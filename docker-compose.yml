@@ -1,0 +1,20 @@
+services:
+  slither-bot:
+    build: .
+    ports:
+      - "6080:6080"
+    environment:
+      DISPLAY: ":99"
+      SCREEN_WIDTH: "1280"
+      SCREEN_HEIGHT: "720"
+      NVIDIA_VISIBLE_DEVICES: "all"
+    volumes:
+      - .:/app
+    shm_size: "2g"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

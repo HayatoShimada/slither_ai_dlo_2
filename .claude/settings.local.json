@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:slitherio-bot.readthedocs.io)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:greasyfork.org)",
+      "Bash(chmod:*)",
+      "Bash(python3:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(dpkg:*)",
+      "Bash(docker:*)",
+      "Bash(curl:*)",
+      "Bash(sudo gpg:*)",
+      "Bash(sudo tee:*)",
+      "Bash(sudo apt-get update:*)",
+      "Bash(sudo kill:*)",
+      "Bash(sudo rm:*)",
+      "Bash(ls:*)",
+      "WebFetch(domain:iris.polito.it)",
+      "WebFetch(domain:www.researchgate.net)",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(python:*)",
+      "Bash(python -c:*)",
+      "Bash(docker-compose build:*)",
+      "Bash(docker-compose:*)",
+      "Bash(pip3 install:*)",
+      "Bash(pip3 list:*)",
+      "Bash(apt list:*)",
+      "Bash(pip3 show:*)"
+    ]
+  }
+}
