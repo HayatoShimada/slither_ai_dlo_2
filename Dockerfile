@@ -5,8 +5,9 @@ ENV DISPLAY=:99
 ENV SCREEN_WIDTH=1280
 ENV SCREEN_HEIGHT=720
 
-# System dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# System dependencies (remove APT Post-Invoke hooks that fail in Docker build)
+RUN rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
     x11vnc \
     novnc \
@@ -38,8 +39,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install Python dependencies (cached layer)
+ENV PIP_PROGRESS_BAR=off
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt \
+RUN pip3 install --no-cache-dir --upgrade pip \
+    && pip3 install --no-cache-dir -r requirements.txt \
     && pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121
 
 # Copy source code

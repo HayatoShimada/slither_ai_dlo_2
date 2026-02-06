@@ -46,6 +46,14 @@ docker compose up
 # http://localhost:6080
 ```
 
+**「compose build requires buildx 0.17.0 or later」と出る場合**（Docker / buildx が古い場合）は、従来のビルダーでイメージを組み、compose は起動だけにします:
+
+```bash
+# 従来の docker build でイメージを作成（buildx 不要）
+docker build -t slither_ai_dlo-slither-bot .
+docker compose up
+```
+
 コンテナ内で自動的に Xvfb → VNC → Chromium → ゲーム開始 → RL 学習が始まります。
 
 ### ローカル（骨格可視化・HSV 調整用）
