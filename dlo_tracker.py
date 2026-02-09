@@ -197,14 +197,20 @@ class DLOTracker:
         d_center = new_dlo.center - prev.center
         track.velocity_ema = alpha * d_center + (1 - alpha) * track.velocity_ema
 
-        # 骨格点速度（点数が一致する場合のみ）
-        if (
-            prev.skeleton_yx is not None
-            and new_dlo.skeleton_yx is not None
-            and len(prev.skeleton_yx) == len(new_dlo.skeleton_yx)
-        ):
-            d_skel = (new_dlo.skeleton_yx - prev.skeleton_yx).astype(np.float64)
-            if track.skeleton_velocity_ema is None:
+        # 骨格点速度
+        if prev.skeleton_yx is not None and new_dlo.skeleton_yx is not None:
+            n_new = len(new_dlo.skeleton_yx)
+            if len(prev.skeleton_yx) == n_new:
+                d_skel = (new_dlo.skeleton_yx - prev.skeleton_yx).astype(np.float64)
+            else:
+                # 点数が変わった場合はリサンプルして差分を計算
+                idx = np.linspace(0, len(prev.skeleton_yx) - 1, n_new, dtype=int)
+                d_skel = (new_dlo.skeleton_yx - prev.skeleton_yx[idx]).astype(np.float64)
+
+            if (
+                track.skeleton_velocity_ema is None
+                or len(track.skeleton_velocity_ema) != n_new
+            ):
                 track.skeleton_velocity_ema = d_skel
             else:
                 track.skeleton_velocity_ema = (

@@ -135,20 +135,110 @@ def run_debug_mask():
 def run_bot():
     """
     Docker コンテナ内での自動運転モード。
-    ブラウザ起動 → ゲーム開始 → RL 学習ループを実行する。
+    ブラウザ起動 → ゲーム開始 → PPO 学習ループを実行する。
+    model.learn() により重み更新が自動で行われる。
     """
+    import time
+
     from browser import create_driver, start_game
+    from config import RL_OBS_MODE, CNN_FRAME_STACK
     from game_env import SlitherEnv
-    from monitor import update_monitor, RLInfo
     from agent_rl import create_agent, load_model, save_model
     from dlo_tracker import DLOTracker
+    from stable_baselines3.common.callbacks import BaseCallback
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
+
+    class EpisodeLogCallback(BaseCallback):
+        """エピソード終了ごとにログを出力するコールバック。"""
+
+        def __init__(self, save_interval: int = 10000, verbose: int = 0):
+            super().__init__(verbose)
+            self._episode_count = 0
+            self._episode_reward = 0.0
+            self._episode_steps = 0
+            self._episode_start_time = time.time()
+            self._save_interval = save_interval
+
+        def _on_step(self) -> bool:
+            self._episode_reward += self.locals["rewards"][0]
+            self._episode_steps += 1
+
+            # エピソード終了
+            dones = self.locals.get("dones", self.locals.get("done"))
+            if dones is not None and (dones[0] if hasattr(dones, '__len__') else dones):
+                self._episode_count += 1
+                # VecFrameStack → DummyVecEnv → env を貫通して base env を取得
+                venv = self.training_env
+                while hasattr(venv, "venv"):
+                    venv = venv.venv
+                env = venv.envs[0]
+                base_env = getattr(env, "unwrapped", env)
+                score = 0
+                try:
+                    from browser import get_score
+                    score = get_score(env.driver)
+                except Exception:
+                    pass
+                # 認識ベースの成長指標
+                length_px = None
+                area_px = None
+                try:
+                    dlo = getattr(base_env, "last_dlo_state", None)
+                    if dlo and getattr(dlo, "self_dlo", None) is not None:
+                        length_px = dlo.self_dlo.length
+                    mask = getattr(base_env, "_last_self_mask", None)
+                    if mask is not None:
+                        area_px = float(np.sum(mask > 0))
+                except Exception:
+                    pass
+                survival_sec = time.time() - self._episode_start_time
+                length_str = f"  length={length_px:.0f}px" if length_px is not None else ""
+                area_str = f"  area={area_px:.0f}px²" if area_px is not None else ""
+                # 報酬内訳
+                rb_str = ""
+                try:
+                    rb = base_env.reward_breakdown
+                    rb_str = (
+                        f"  [surv={rb['survival']:+.1f} "
+                        f"grow={rb['growth']:+.1f} "
+                        f"food={rb.get('food', 0):+.1f} "
+                        f"enemy={rb['enemy']:+.1f} "
+                        f"coll={rb['collision']:+.1f} "
+                        f"wall={rb['wall']:+.1f}]"
+                    )
+                except Exception:
+                    pass
+                print(
+                    f"[Episode {self._episode_count}] "
+                    f"alive={survival_sec:.1f}s  "
+                    f"steps={self._episode_steps}  "
+                    f"reward={self._episode_reward:+.1f}{rb_str}  "
+                    f"score={score}{length_str}{area_str}  "
+                    f"total_steps={self.num_timesteps}"
+                )
+                self._episode_reward = 0.0
+                self._episode_steps = 0
+                self._episode_start_time = time.time()
+
+            # 定期保存
+            if self.num_timesteps % self._save_interval == 0 and self.num_timesteps > 0:
+                print(f"[Save] step={self.num_timesteps} -> models/")
+                self.model.save("models/slither_ppo")
+
+            return True
 
     print("=== Slither.io Bot Mode (DLO) ===")
+    print(f"Observation mode: {RL_OBS_MODE}")
     print("Starting browser...")
 
     driver = create_driver()
     try:
         start_game(driver)
+
+        # window.snake の全プロパティをダンプ（初回診断）
+        time.sleep(3)
+        from browser import dump_snake_properties
+        dump_snake_properties(driver)
 
         # 自機カラー自動検出
         hsv_lower, hsv_upper = None, None
@@ -159,63 +249,30 @@ def run_bot():
         tracker = DLOTracker()
         env = SlitherEnv(driver, tracker=tracker, hsv_lower=hsv_lower, hsv_upper=hsv_upper)
 
+        # hybrid モード: VecFrameStack でフレームスタッキング
+        if RL_OBS_MODE == "hybrid":
+            print(f"Hybrid mode: wrapping with VecFrameStack(n_stack={CNN_FRAME_STACK})")
+            venv = DummyVecEnv([lambda e=env: e])
+            venv = VecFrameStack(venv, n_stack=CNN_FRAME_STACK, channels_order="last")
+            train_env = venv
+        else:
+            train_env = env
+
         print("Loading or creating RL agent...")
-        model = load_model(env)
+        model = load_model(train_env)
         if model is None:
             print("No existing model found. Creating new agent...")
-            model = create_agent(env)
+            model = create_agent(train_env)
 
-        rl_info = RLInfo()
-        obs, info = env.reset()
-
-        print("Starting training loop...")
-        while True:
-            # エージェントが行動を推論
-            action, _states = model.predict(obs, deterministic=False)
-
-            # 環境を1ステップ進める
-            obs, reward, terminated, truncated, info = env.step(action)
-
-            # RL 情報更新
-            rl_info.reward = reward
-            rl_info.total_reward += reward
-            rl_info.action_angle = float(action[0])
-            rl_info.action_boost = float(action[1]) > 0.5
-            rl_info.step_count += 1
-            rl_info.reward_history.append(reward)
-
-            # 認識モニタ更新（DLO 情報付き）
-            update_monitor(
-                frame=info.get("frame", env.last_frame),
-                self_mask=info.get("self_mask", env.last_self_mask),
-                self_skeleton=info.get("skeleton", env.last_skeleton),
-                enemies=info.get("enemies", env.last_enemies),
-                rl_info=rl_info,
-                dlo_state=info.get("dlo_state", env.last_dlo_state),
-                predicted_dlos=info.get("predicted_dlos", env.last_predicted_dlos),
-            )
-
-            # ゲームオーバー → リセット
-            if terminated or truncated:
-                rl_info.episode_count += 1
-                print(
-                    f"Episode {rl_info.episode_count} ended. "
-                    f"Steps: {rl_info.step_count}, "
-                    f"Total reward: {rl_info.total_reward:.1f}"
-                )
-                rl_info.total_reward = 0.0
-                obs, info = env.reset()
-
-            # 定期的にモデル保存
-            if rl_info.step_count % 10000 == 0 and rl_info.step_count > 0:
-                save_model(model)
+        print("Starting PPO training (weights will be updated)...")
+        callback = EpisodeLogCallback(save_interval=10000)
+        model.learn(total_timesteps=10_000_000, callback=callback)
 
     except KeyboardInterrupt:
         print("\nStopping bot...")
     finally:
         save_model(model)
         driver.quit()
-        cv2.destroyAllWindows()
         print("Bot stopped.")
 
 

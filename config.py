@@ -61,5 +61,14 @@ DLO_MATCH_MAX_DIST = 200     # マッチング最大距離 (px)
 # --- 強化学習 ---
 RL_MODEL_DIR = os.environ.get("RL_MODEL_DIR", "models")
 RL_SAVE_INTERVAL = int(os.environ.get("RL_SAVE_INTERVAL", "10000"))
+# MlpPolicy は CPU の方が効くことが多い。GPU 警告を消すなら "cpu"、GPU を使うなら "cuda" / "auto"
+RL_DEVICE = os.environ.get("RL_DEVICE", "auto")
 TOP_K_ENEMIES = 8
 TOP_M_FOOD = 16
+
+# --- CNN ハイブリッド観測 ---
+RL_OBS_MODE = os.environ.get("RL_OBS_MODE", "hybrid")  # "vector" or "hybrid"
+CNN_INPUT_SIZE = (84, 84)
+CNN_FRAME_STACK = 4
+CNN_BATCH_SIZE = 256
+CNN_FEATURES_DIM = 256

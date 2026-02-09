@@ -8,9 +8,13 @@ services:
       SCREEN_WIDTH: "1280"
       SCREEN_HEIGHT: "720"
       NVIDIA_VISIBLE_DEVICES: "all"
+      PYTHONUNBUFFERED: "1"
     volumes:
       - .:/app
     shm_size: "2g"
+    # "can't start new thread" 対策（matplotlib / PyTorch 等がスレッドを多用するため）
+    ulimits:
+      nproc: 8192
     deploy:
       resources:
         reservations:

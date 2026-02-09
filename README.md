@@ -42,8 +42,9 @@ Docker コンテナ (nvidia/cuda + Ubuntu 22.04)
 docker compose build
 docker compose up
 
-# ブラウザで認識モニタを確認
-# http://localhost:6080
+# ブラウザで認識モニタを確認（URL は起動ログに表示）
+# 同じマシン: http://localhost:6080
+# リモート:    http://<サーバのIP>:6080  （サーバで hostname -I で IP 確認）
 ```
 
 **「compose build requires buildx 0.17.0 or later」と出る場合**（Docker / buildx が古い場合）は、従来のビルダーでイメージを組み、compose は起動だけにします:
@@ -52,6 +53,12 @@ docker compose up
 # 従来の docker build でイメージを作成（buildx 不要）
 docker build -t slither_ai_dlo-slither-bot .
 docker compose up
+```
+
+**「RuntimeError: can't start new thread」で pip が落ちる場合**は、プロセス数上限を上げてビルドします:
+
+```bash
+docker build --ulimit nproc=8192:8192 -t slither_ai_dlo-slither-bot .
 ```
 
 コンテナ内で自動的に Xvfb → VNC → Chromium → ゲーム開始 → RL 学習が始まります。
@@ -115,7 +122,14 @@ python main.py bot
 
 ### 認識モニタ
 
-`http://localhost:6080` の VNC 画面に 2×2 グリッドで表示されます。
+noVNC の URL で 2×2 グリッドを表示します。
+
+| アクセス方法 | URL |
+|--------------|-----|
+| **同じマシン**（Docker を動かしている PC のブラウザ） | `http://localhost:6080` |
+| **リモート**（別 PC から s61 などに SSH している場合） | `http://<サーバのIP>:6080` |
+
+サーバの IP は、Docker を動かしているマシンで `hostname -I` または `ip -4 addr` で確認してください（例: `192.168.1.10` → `http://192.168.1.10:6080`）。
 
 | パネル | 内容 |
 |--------|------|

@@ -29,7 +29,9 @@
       "Bash(pip3 install:*)",
       "Bash(pip3 list:*)",
       "Bash(apt list:*)",
-      "Bash(pip3 show:*)"
+      "Bash(pip3 show:*)",
+      "Bash(sudo docker compose:*)",
+      "WebFetch(domain:stable-baselines3.readthedocs.io)"
     ]
   }
 }

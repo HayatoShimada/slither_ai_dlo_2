@@ -30,7 +30,7 @@ def create_driver() -> webdriver.Chrome:
         設定済みの WebDriver インスタンス。
     """
     options = Options()
-    options.binary_location = "/usr/bin/chromium-browser"
+    options.binary_location = "/usr/bin/google-chrome-stable"
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument(f"--window-size={SCREEN_WIDTH},{SCREEN_HEIGHT}")
@@ -38,8 +38,8 @@ def create_driver() -> webdriver.Chrome:
     options.add_argument("--disable-gpu-sandbox")
     options.add_argument("--disable-extensions")
 
-    service = Service("/usr/bin/chromedriver")
-    driver = webdriver.Chrome(service=service, options=options)
+    # Selenium 4.6+ は chromedriver を自動ダウンロード・管理する
+    driver = webdriver.Chrome(options=options)
     return driver
 
 
@@ -58,7 +58,7 @@ def start_game(driver: webdriver.Chrome) -> None:
     WebDriverWait(driver, 30).until(
         EC.presence_of_element_located((By.ID, "nick"))
     )
-    time.sleep(2)  # アセット読み込み余裕
+    time.sleep(1)  # アセット読み込み余裕
 
     # ニックネーム入力
     nick_input = driver.find_element(By.ID, "nick")
@@ -116,53 +116,91 @@ def is_game_over(driver: webdriver.Chrome) -> bool:
 
 def restart_game(driver: webdriver.Chrome) -> None:
     """
-    ゲームオーバー後に再プレイする。
-
-    Parameters
-    ----------
-    driver : webdriver.Chrome
-        既存の WebDriver。
+    ゲームオーバー後にページをフルリロードして再プレイする。
+    ボタンクリックは不安定なため、常にフルリロードで確実にリスタートする。
     """
-    print("Restarting game...")
-    time.sleep(2)
-
-    # 再プレイボタンをクリック、または JS でリスタート
-    try:
-        driver.execute_script(
-            "var btn = document.querySelector('.play-btn') || "
-            "document.querySelector('.btn-play') || "
-            "document.getElementById('playh'); "
-            "if(btn) btn.click(); else if(window.play) window.play();"
-        )
-    except Exception:
-        # ページをリロードして最初からやり直す
-        start_game(driver)
-        return
-
-    for _ in range(60):
-        if is_playing(driver):
-            print("Game restarted successfully.")
-            return
-        time.sleep(0.5)
-
-    # フォールバック: フルリロード
-    print("Restart via button failed, reloading page...")
+    print("Restarting game (full reload)...")
     start_game(driver)
 
 
-def get_score(driver: webdriver.Chrome) -> int:
+def get_game_state(driver: webdriver.Chrome) -> dict:
     """
-    現在のスコア（ヘビの長さ）を JS で取得する。
+    1回の JS 呼び出しでスコア・マップ位置・境界比率をまとめて取得する。
+    Selenium のラウンドトリップを最小化するためバッチ化。
 
     Returns
     -------
-    int
-        スコア値。取得失敗時は 0。
+    dict
+        {"score": int, "boundary_ratio": float, "playing": bool}
+        取得失敗時はデフォルト値。
     """
     try:
-        score = driver.execute_script(
-            "return window.snake ? window.snake.sct : 0;"
-        )
-        return int(score) if score else 0
+        result = driver.execute_script("""
+            var out = {score: 0, boundary_ratio: -1, playing: false};
+            out.playing = !!(window.playing);
+
+            var s = window.snake;
+            if (!s) return out;
+
+            // スコア: pts.length > fam > sct の優先順
+            if (s.pts && s.pts.length > 0) out.score = s.pts.length;
+            else if (s.fam && s.fam > 0) out.score = Math.floor(s.fam);
+            else if (s.sct && s.sct > 0) out.score = s.sct;
+
+            // マップ位置 → 境界比率
+            var x = s.xx || s.x || 0;
+            var y = s.yy || s.y || 0;
+            if (x > 0 && y > 0) {
+                var grd = window.grd || 21600;
+                var dx = x - grd;
+                var dy = y - grd;
+                var dist = Math.sqrt(dx*dx + dy*dy);
+                out.boundary_ratio = Math.min(dist / grd, 1.0);
+            }
+            return out;
+        """)
+        if result and isinstance(result, dict):
+            return {
+                "score": int(result.get("score", 0)),
+                "boundary_ratio": float(result.get("boundary_ratio", -1.0)),
+                "playing": bool(result.get("playing", False)),
+            }
     except Exception:
-        return 0
+        pass
+    return {"score": 0, "boundary_ratio": -1.0, "playing": False}
+
+
+def get_map_boundary_ratio(driver: webdriver.Chrome) -> float:
+    """後方互換ラッパー。"""
+    return get_game_state(driver)["boundary_ratio"]
+
+
+def dump_snake_properties(driver: webdriver.Chrome) -> None:
+    """window.snake の全プロパティをログに出力する（初回診断用）。"""
+    try:
+        result = driver.execute_script("""
+            if (!window.snake) return 'window.snake is null/undefined';
+            var props = {};
+            for (var k in window.snake) {
+                var v = window.snake[k];
+                var t = typeof v;
+                if (t === 'number' || t === 'boolean' || t === 'string') {
+                    props[k] = v;
+                } else if (Array.isArray(v)) {
+                    props[k] = 'Array(' + v.length + ')';
+                } else if (v === null) {
+                    props[k] = 'null';
+                } else {
+                    props[k] = t;
+                }
+            }
+            return JSON.stringify(props, null, 2);
+        """)
+        print(f"[DEBUG] window.snake properties:\n{result}")
+    except Exception as e:
+        print(f"[DEBUG] Failed to dump snake properties: {e}")
+
+
+def get_score(driver: webdriver.Chrome) -> int:
+    """後方互換ラッパー。"""
+    return get_game_state(driver)["score"]
