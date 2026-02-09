@@ -56,11 +56,13 @@ GPU_TYPE=nvidia docker compose -f docker-compose.yml -f docker-compose.nvidia.ym
 GPU_TYPE=amd docker compose -f docker-compose.yml -f docker-compose.amd.yml up --build
 ```
 
-#### CPU のみ
+#### CPU のみ（Mac / Apple Silicon 含む）
 
 ```bash
 docker compose up --build
 ```
+
+Mac や Apple Silicon では同じコマンドで OK。イメージは arm64/amd64 に合わせてビルドされ、ブラウザは Chromium (.deb) を使用します。
 
 #### 共通
 
@@ -85,13 +87,37 @@ docker build --ulimit nproc=8192:8192 --build-arg GPU_TYPE=nvidia -t slither_ai_
 
 コンテナ内で自動的に Xvfb → VNC → Chromium → ゲーム開始 → RL 学習が始まります。
 
-### ローカル（骨格可視化・HSV 調整用）
+### ローカル（どの環境でも同じ手順で立ち上がる）
+
+**macOS / Linux:**
 
 ```bash
-cd /path/to/slither_ai_dlo
-python -m venv .venv
+cd /path/to/slither_ai_dlo_2
+./scripts/setup.sh          # 初回のみ。python3/python で .venv を作成し依存をインストール
+./scripts/run.sh            # 骨格可視化
+./scripts/run.sh debug      # HSV デバッグ
+./scripts/run.sh bot        # 自動運転 + 強化学習
+```
+
+`run.sh` は仮想環境が無い／壊れている場合に自動で `setup.sh` を実行してから起動します。
+
+**Windows (PowerShell):**
+
+```powershell
+cd \path\to\slither_ai_dlo_2
+.\scripts\setup.ps1         # 初回のみ
+.\scripts\run.ps1 bot       # 例: bot 起動
+.\scripts\run.ps1 debug     # 例: デバッグ
+```
+
+**手動で venv を使う場合:**
+
+```bash
+cd /path/to/slither_ai_dlo_2
+python3 -m venv .venv       # または python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+python main.py bot
 ```
 
 ## 使い方
@@ -111,7 +137,7 @@ pip install -r requirements.txt
 ### 2. 骨格の可視化
 
 ```bash
-python main.py
+./scripts/run.sh            # または source .venv/bin/activate && python main.py
 ```
 
 - ゲーム画面をキャプチャし、自機の骨格を **緑（頭）→ 青（胴）→ 赤（尾）** でオーバーレイ表示
@@ -120,16 +146,17 @@ python main.py
 ### 3. マスクのデバッグ（HSV 調整用）
 
 ```bash
-python main.py debug
+./scripts/run.sh debug
 ```
 
 - 左上: 元画像 / 右上: 色マスク / 左下: 最大連結成分 / 右下: 細線化骨格
 - 骨格がうまく出ない場合はこの画面で HSV を調整
 
-### 4. 自動運転 Bot（Docker 内）
+### 4. 自動運転 Bot
 
 ```bash
-python main.py bot
+./scripts/run.sh bot        # ローカル（Slither.io が表示されている画面をキャプチャ）
+# または Docker 内で python main.py bot が自動実行される
 ```
 
 - Chromium で slither.io を開き、自動でゲーム開始
@@ -170,7 +197,7 @@ CNN + MLP のマルチ入力観測。`MultiInputPolicy`（SB3 の `CombinedExtra
 
 ## 認識モニタ
 
-noVNC (`http://localhost:6080`) で 2×2 グリッドを表示。
+noVNC (`http://localhost:6080/`) で 2×2 グリッドを表示。
 
 | パネル | 内容 |
 |--------|------|

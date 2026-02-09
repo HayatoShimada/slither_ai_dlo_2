@@ -5,6 +5,7 @@ Docker コンテナ内の Xvfb に実描画する (headless=False)。
 
 from __future__ import annotations
 
+import os
 import time
 
 from selenium import webdriver
@@ -30,7 +31,7 @@ def create_driver() -> webdriver.Chrome:
         設定済みの WebDriver インスタンス。
     """
     options = Options()
-    options.binary_location = "/usr/bin/google-chrome-stable"
+    options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/google-chrome-stable")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument(f"--window-size={SCREEN_WIDTH},{SCREEN_HEIGHT}")

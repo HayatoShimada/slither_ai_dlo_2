@@ -43,10 +43,13 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean \
     util-linux \
     && rm -rf /var/lib/apt/lists/*
 
-# Google Chrome (snap 不要、Docker 対応)
-RUN wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-    && apt-get update && apt-get install -y /tmp/chrome.deb \
-    && rm -f /tmp/chrome.deb && rm -rf /var/lib/apt/lists/*
+# Chromium（.deb、arm64/amd64 両対応。Ubuntu 22.04 標準は snap のため PPA で .deb を導入）
+RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common \
+    && add-apt-repository -y ppa:xtradeb/apps \
+    && apt-get update && apt-get install -y --no-install-recommends chromium \
+    && apt-get remove -y --purge software-properties-common \
+    && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+ENV CHROME_BIN=/usr/bin/chromium
 
 WORKDIR /app
 

@@ -12,31 +12,41 @@ Slither.io automation AI. The system captures the game screen, extracts the play
 
 ## Commands
 
+**どの環境でも立ち上がる（推奨）:**
+
 ```bash
-# Setup (local development)
+# macOS / Linux: 初回セットアップ＋起動
+./scripts/setup.sh           # 初回のみ。python3/python で .venv を作成・修復し依存をインストール
+./scripts/run.sh             # 骨格可視化
+./scripts/run.sh debug       # HSV デバッグ
+./scripts/run.sh bot         # 自動運転 + 強化学習（venv が無い/壊れていれば setup を自動実行）
+```
+
+```powershell
+# Windows (PowerShell)
+.\scripts\setup.ps1
+.\scripts\run.ps1 bot
+```
+
+**手動で venv を使う場合:**
+
+```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-
-# Run (normal mode - live skeleton overlay)
-python main.py
-
-# Run (debug mode - HSV calibration with multi-panel view)
-python main.py debug
-
-# Run (bot mode - Docker container, RL training)
 python main.py bot
+```
 
-# Docker (full autonomous setup)
+**Docker (full autonomous setup):**
+
+```bash
 # NVIDIA GPU:
 GPU_TYPE=nvidia docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up --build
 # AMD GPU (Radeon/ROCm):
 GPU_TYPE=amd docker compose -f docker-compose.yml -f docker-compose.amd.yml up --build
 # CPU only:
 docker compose up --build
-
-# Access monitoring via browser
-# http://localhost:6080 (noVNC)
+# Access monitoring: http://localhost:6080 (noVNC)
 ```
 
 No test framework, linter, or build system is configured yet.
