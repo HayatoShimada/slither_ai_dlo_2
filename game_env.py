@@ -322,12 +322,14 @@ class SlitherEnv(gym.Env):
         # JS 動作検証ログ（エピソード開始時にマップ座標が取れるか確認）
         js_state = get_game_state(self.driver)
         br = js_state["boundary_ratio"]
+        js_dbg = js_state.get("_debug", "")
         hint = " (JS位置なし→画面の赤で壁ペナルティ)" if br < 0 else ""
         print(
             f"[JS check] boundary_ratio={br:.3f} "
             f"map_dx={js_state.get('map_dx', 'N/A')} "
             f"map_dy={js_state.get('map_dy', 'N/A')} "
-            f"score={js_state['score']} playing={js_state['playing']}{hint}",
+            f"score={js_state['score']} playing={js_state['playing']} "
+            f"src={js_dbg}{hint}",
             flush=True,
         )
 
@@ -395,9 +397,11 @@ class SlitherEnv(gym.Env):
             js_br = info.get("js_boundary_ratio", -1)
             mdx = info.get("map_dx", 0)
             mdy = info.get("map_dy", 0)
+            js_dbg = info.get("js_debug", "")
             print(
                 f"  [step {self._step_count}] area={area:.0f} wall={wall:.2f} "
                 f"js_br={js_br:.2f} map=({mdx:.2f},{mdy:.2f}) "
+                f"src={js_dbg} "
                 f"fdiff={frame_diff:.1f} js_over={js_game_over} "
                 f"stale={self._stale_frame_count}"
                 f"{'  >>> GAME OVER' if terminated else ''}",
@@ -594,6 +598,7 @@ class SlitherEnv(gym.Env):
             "map_dx": map_dx,
             "map_dy": map_dy,
             "js_playing": js_state.get("playing", False),
+            "js_debug": js_state.get("_debug", ""),
         }
 
         if self._obs_mode == "hybrid":
