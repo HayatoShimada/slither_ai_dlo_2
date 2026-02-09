@@ -188,10 +188,25 @@ def get_game_state(driver: webdriver.Chrome) -> dict:
             }
             if (!s) { out._debug = 'no_snake(scanned:' + (checked||0) + ')'; return out; }
 
-            // --- スコア ---
-            if (s.pts && s.pts.length > 0) out.score = s.pts.length;
-            else if (typeof s.fam === 'number' && s.fam > 0) out.score = Math.floor(s.fam);
-            else if (typeof s.sct === 'number' && s.sct > 0) out.score = s.sct;
+            // --- スコア（安定した指標を優先） ---
+            // 実スコア計算: sct + fam + fpsls/fmlts テーブル
+            if (typeof s.sct === 'number' && s.sct > 0) {
+                try {
+                    var sc = Math.min(6, s.sct);
+                    var fp = (window.fpsls && window.fpsls[sc]) || 0;
+                    var fm = (window.fmlts && window.fmlts[sc]) || 1;
+                    var fam = (typeof s.fam === 'number') ? s.fam : 0;
+                    var realScore = Math.floor(15 * (fp + fam / fm - 1) - 5);
+                    out.score = (realScore > 0) ? realScore : s.sct;
+                } catch(e) {
+                    out.score = s.sct;
+                }
+            }
+            // フォールバック: fam → pts.length
+            if (out.score <= 0 && typeof s.fam === 'number' && s.fam > 0)
+                out.score = Math.floor(s.fam);
+            if (out.score <= 0 && s.pts && s.pts.length > 0)
+                out.score = Math.floor(s.pts.length / 3);
 
             // --- マップ位置（複数パターンで探索） ---
             var x = NaN, y = NaN, src = '';

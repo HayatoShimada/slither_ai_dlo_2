@@ -293,13 +293,10 @@ class SlitherEnv(gym.Env):
             time.sleep(0.5)
         self._empty_mask_count = 0
 
-        # 自機カラー再検出（5エピソードに1回。毎回やると遅い）
-        if AUTO_DETECT_COLOR and self._step_count == 0:
-            if not hasattr(self, '_reset_count'):
-                self._reset_count = 0
-            self._reset_count += 1
-            if self._reset_count <= 1 or self._reset_count % 5 == 0:
-                self._hsv_lower, self._hsv_upper = auto_detect_snake_color(capture_screen)
+        # 自機カラー再検出（毎エピソード。ゲームごとに色が変わるため必須）
+        if AUTO_DETECT_COLOR:
+            time.sleep(0.5)  # ゲーム描画が安定するまで待機
+            self._hsv_lower, self._hsv_upper = auto_detect_snake_color(capture_screen)
 
         self._prev_score = 0
         self._prev_length_px = 0.0
@@ -566,15 +563,16 @@ class SlitherEnv(gym.Env):
                     # 正規化: 近いほど 1.0、遠いほど 0.0
                     collision_risk[i] = np.clip(1.0 - min_d / 300.0, 0.0, 1.0)
 
-        # 自機の認識ベース指標
+        # 6. JS 経由のゲーム状態（面積計算前に取得: ゲームオーバー判定に使う）
+        js_state = get_game_state(self.driver)
+        js_playing = js_state.get("playing", False)
+
+        # 自機の認識ベース指標（ゲームオーバーフレームは誤検出を防ぐため除外）
         length_px = dlo_state.self_dlo.length if dlo_state.self_dlo is not None else 0.0
-        area_px = float(np.sum(self_mask > 0)) if self_mask is not None else 0.0
+        area_px = (float(np.sum(self_mask > 0)) if self_mask is not None else 0.0) if js_playing else 0.0
 
         # 壁検出（HSV 再利用。報酬計算用）
         boundary_proximity = detect_boundary_proximity(frame, hsv_img=hsv)
-
-        # 6. マップ位置 (2 dim): JS 経由のマップ中心からの正規化座標
-        js_state = get_game_state(self.driver)
         js_boundary_ratio = js_state["boundary_ratio"]
         map_dx = js_state.get("map_dx", 0.0)
         map_dy = js_state.get("map_dy", 0.0)
@@ -644,21 +642,26 @@ class SlitherEnv(gym.Env):
         reward += r_survival
         self._reward_survival += r_survival
 
-        # 成長報酬（主要シグナル: 餌を食べて面積が増加 → 大きな報酬）
+        # 成長報酬（主要シグナル: 餌を食べて面積が増加 → 報酬）
         r_growth = 0.0
-        current_area = info.get("area_px", 0.0)
+        # ゲームオーバーフレームは面積が誤検出されるため除外
+        is_alive = info.get("js_playing", True)
+        current_area = info.get("area_px", 0.0) if is_alive else 0.0
         if current_area > 0 and self._prev_area_px > 0:
             delta_area = current_area - self._prev_area_px
             if delta_area > 0:
-                # 面積増加に強い報酬（餌獲得が最も重要な行動）
-                r_growth = min(delta_area / 100.0, 5.0)
-        self._prev_area_px = current_area
+                r_growth = min(delta_area / 200.0, 3.0)
+        self._prev_area_px = current_area if current_area > 0 else self._prev_area_px
 
         # JS スコアも補助的に使用（取れる場合のみ）
-        current_score = info.get("score", 0)
+        current_score = info.get("score", 0) if is_alive else 0
         if current_score > 0 and current_score > self._prev_score:
-            r_growth += 2.0 * (current_score - self._prev_score)
-        self._prev_score = current_score
+            r_growth += min(1.0 * (current_score - self._prev_score), 5.0)
+        if current_score > 0:
+            self._prev_score = current_score
+
+        # 成長報酬のトータルキャップ（1ステップあたり最大5.0）
+        r_growth = min(r_growth, 5.0)
         reward += r_growth
         self._reward_growth += r_growth
 

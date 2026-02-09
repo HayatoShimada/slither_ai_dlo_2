@@ -30,7 +30,7 @@ SNAKE_HSV_UPPER = (85, 255, 255) # 緑の上限 — デフォルト/フォール
 # --- 自機カラー自動検出 ---
 AUTO_DETECT_COLOR = True           # True: ゲーム開始時に自機の色を自動検出する
 COLOR_DETECT_ROI_SIZE = 200        # 画面中心から切り出す ROI の辺長 (px)
-COLOR_DETECT_HUE_MARGIN = 15      # ピーク hue からの許容幅 (±)
+COLOR_DETECT_HUE_MARGIN = 20      # ピーク hue からの許容幅 (±)
 COLOR_DETECT_MIN_FG_PIXELS = 50   # 前景ピクセルの最低数（これ未満は検出失敗）
 
 # マスクのノイズ除去
