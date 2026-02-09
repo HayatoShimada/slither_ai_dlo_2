@@ -24,6 +24,24 @@ from config import (
     AUTO_DETECT_COLOR,
     RL_OBS_MODE,
     CNN_INPUT_SIZE,
+    REWARD_SURVIVAL,
+    REWARD_GROWTH_SCORE_SCALE,
+    REWARD_GROWTH_SCORE_CAP,
+    REWARD_GROWTH_TOTAL_CAP,
+    REWARD_FOOD_APPROACH_SCALE,
+    REWARD_FOOD_APPROACH_MIN,
+    REWARD_FOOD_APPROACH_MAX,
+    REWARD_ENEMY_DIST_THRESH,
+    REWARD_ENEMY_MAX_PENALTY,
+    REWARD_COLLISION_DIST_THRESH,
+    REWARD_COLLISION_MAX_PENALTY,
+    REWARD_WALL_THRESH,
+    REWARD_WALL_LINEAR,
+    REWARD_WALL_QUAD,
+    REWARD_CENTER_SCALE,
+    REWARD_DEATH_NORMAL,
+    REWARD_DEATH_WALL,
+    REWARD_DEBUG_LOG,
 )
 from capture import capture_screen
 from snake_skeleton import (
@@ -237,9 +255,12 @@ class SlitherEnv(gym.Env):
                 low=-1.0, high=1.0, shape=(self.OBS_DIM,), dtype=np.float32,
             )
 
+        # 行動空間を [-1, 1] に正規化（PPO の初期方策 N(0,1) と相性が良い）
+        # action[0]: -1~+1 → 0~360° (角度)
+        # action[1]: -1~+1 → 0~1 (ブースト, >0 で ON)
         self.action_space = spaces.Box(
-            low=np.array([0.0, 0.0], dtype=np.float32),
-            high=np.array([360.0, 1.0], dtype=np.float32),
+            low=np.array([-1.0, -1.0], dtype=np.float32),
+            high=np.array([1.0, 1.0], dtype=np.float32),
         )
 
         self._prev_score = 0
@@ -287,7 +308,7 @@ class SlitherEnv(gym.Env):
         }
 
         # ゲームオーバー判定（画像 + JS フォールバック）
-        frame = capture_screen()
+        frame = self._capture_browser()
         if detect_game_over(frame) or is_game_over(self.driver):
             restart_game(self.driver)
             time.sleep(0.5)
@@ -296,7 +317,7 @@ class SlitherEnv(gym.Env):
         # 自機カラー再検出（毎エピソード。ゲームごとに色が変わるため必須）
         if AUTO_DETECT_COLOR:
             time.sleep(0.5)  # ゲーム描画が安定するまで待機
-            self._hsv_lower, self._hsv_upper = auto_detect_snake_color(capture_screen)
+            self._hsv_lower, self._hsv_upper = auto_detect_snake_color(self._capture_browser)
 
         self._prev_score = 0
         self._prev_length_px = 0.0
@@ -347,15 +368,26 @@ class SlitherEnv(gym.Env):
         tuple[np.ndarray, float, bool, bool, dict]
             (観測, 報酬, terminated, truncated, info)
         """
-        angle = float(action[0])
-        boost_val = float(action[1]) > 0.5
+        # 正規化行動 [-1,1] → 実際の値に変換
+        raw_angle = float(action[0])    # -1 ~ +1
+        raw_boost = float(action[1])    # -1 ~ +1
+        angle = (raw_angle + 1.0) * 180.0  # -1→0°, 0→180°, +1→360°
+        boost_val = raw_boost > 0.0         # 0 より大きければブースト ON
 
         # マウス操作
         move_to_angle(angle, distance=200)
         boost(boost_val)
 
-        # ゲームの進行を待つ
-        time.sleep(0.05)
+        # 操作指示ログ（5ステップごと）
+        if self._step_count % 5 == 0:
+            print(
+                f"  [ACTION] step={self._step_count} raw=({raw_angle:+.2f},{raw_boost:+.2f}) "
+                f"angle={angle:.1f}° boost={'ON' if boost_val else 'OFF'}",
+                flush=True,
+            )
+
+        # ゲームの進行を待つ（短めに設定して学習スループット向上）
+        time.sleep(0.02)
 
         # 観測取得
         obs, info = self._get_observation()
@@ -387,18 +419,18 @@ class SlitherEnv(gym.Env):
 
         terminated = js_game_over or stale_screen
 
-        # デバッグログ（10ステップごと）
-        if self._step_count % 10 == 0 or terminated:
-            area = info.get("area_px", 0)
-            wall = info.get("boundary_ratio", 0)
+        # デバッグログ（5ステップごと）
+        if self._step_count % 5 == 0 or terminated:
             js_br = info.get("js_boundary_ratio", -1)
             mdx = info.get("map_dx", 0)
             mdy = info.get("map_dy", 0)
             js_dbg = info.get("js_debug", "")
+            n_enemy = len(info.get("dlo_state").enemy_dlos) if info.get("dlo_state") else 0
+            n_food = len(info.get("dlo_state").food_positions) if info.get("dlo_state") else 0
             print(
-                f"  [step {self._step_count}] area={area:.0f} wall={wall:.2f} "
+                f"  [step {self._step_count}] score={info.get('score',0)} "
                 f"js_br={js_br:.2f} map=({mdx:.2f},{mdy:.2f}) "
-                f"src={js_dbg} "
+                f"enemy={n_enemy} food={n_food} src={js_dbg} "
                 f"fdiff={frame_diff:.1f} js_over={js_game_over} "
                 f"stale={self._stale_frame_count}"
                 f"{'  >>> GAME OVER' if terminated else ''}",
@@ -407,21 +439,45 @@ class SlitherEnv(gym.Env):
         truncated = False
 
         if terminated:
-            boundary_ratio = info.get("boundary_ratio", 0.0)
-            if boundary_ratio > 0.01:
+            js_br = info.get("js_boundary_ratio", -1.0)
+            # 壁死判定: JS boundary_ratio > 0.85 (マップ端 15% 以内)
+            if js_br > 0.85:
                 # 壁死: 生存報酬を全取り消し + 重い死亡ペナルティ
                 reward += -self._reward_survival  # 生存報酬ゼロ化
-                reward += -20.0
-                self._reward_wall_penalty += -self._reward_survival - 20.0
+                reward += REWARD_DEATH_WALL
+                self._reward_wall_penalty += -self._reward_survival + REWARD_DEATH_WALL
                 self._reward_survival = 0.0
+                print(
+                    f"  [WALL DEATH] step={self._step_count} js_br={js_br:.3f} "
+                    f"penalty={REWARD_DEATH_WALL} (survival cancelled)",
+                    flush=True,
+                )
             else:
                 # 通常死（敵衝突等）
-                reward += -10.0
+                reward += REWARD_DEATH_NORMAL
+                print(
+                    f"  [DEATH] step={self._step_count} js_br={js_br:.3f} "
+                    f"penalty={REWARD_DEATH_NORMAL} (normal death)",
+                    flush=True,
+                )
             boost(False)  # ブースト解除
 
         self._step_count += 1
 
         return obs, reward, terminated, truncated, info
+
+    def _capture_browser(self) -> np.ndarray:
+        """Selenium 経由でブラウザのみをキャプチャする（モニタウィンドウを含まない）。"""
+        try:
+            png = self.driver.get_screenshot_as_png()
+            arr = np.frombuffer(png, dtype=np.uint8)
+            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if frame is not None:
+                return frame
+        except Exception:
+            pass
+        # フォールバック: mss（Selenium が失敗した場合）
+        return capture_screen()
 
     def _preprocess_frame(self, frame: np.ndarray) -> np.ndarray:
         """
@@ -455,7 +511,7 @@ class SlitherEnv(gym.Env):
         tuple[np.ndarray | dict, dict]
             (観測, info dict)
         """
-        frame = capture_screen()
+        frame = self._capture_browser()
         self._last_frame = frame
 
         # HSV 変換を1回だけ実行（全検出処理で共有）
@@ -563,16 +619,22 @@ class SlitherEnv(gym.Env):
                     # 正規化: 近いほど 1.0、遠いほど 0.0
                     collision_risk[i] = np.clip(1.0 - min_d / 300.0, 0.0, 1.0)
 
-        # 6. JS 経由のゲーム状態（面積計算前に取得: ゲームオーバー判定に使う）
-        js_state = get_game_state(self.driver)
+        # 6. JS 経由のゲーム状態（頻度削減: 3ステップに1回 or 自機消失時）
+        if self._step_count % 3 == 0 or np.sum(self_mask) == 0:
+            js_state = get_game_state(self.driver)
+            self._cached_js_state = js_state
+        else:
+            js_state = getattr(self, "_cached_js_state", None)
+            if js_state is None:
+                js_state = get_game_state(self.driver)
+                self._cached_js_state = js_state
         js_playing = js_state.get("playing", False)
 
         # 自機の認識ベース指標（ゲームオーバーフレームは誤検出を防ぐため除外）
         length_px = dlo_state.self_dlo.length if dlo_state.self_dlo is not None else 0.0
         area_px = (float(np.sum(self_mask > 0)) if self_mask is not None else 0.0) if js_playing else 0.0
 
-        # 壁検出（HSV 再利用。報酬計算用）
-        boundary_proximity = detect_boundary_proximity(frame, hsv_img=hsv)
+        # 壁検出（JS ワールド座標ベース。ピクセルベースは誤認が多いため廃止）
         js_boundary_ratio = js_state["boundary_ratio"]
         map_dx = js_state.get("map_dx", 0.0)
         map_dy = js_state.get("map_dy", 0.0)
@@ -591,7 +653,6 @@ class SlitherEnv(gym.Env):
             "score": js_state["score"],
             "length_px": length_px,
             "area_px": area_px,
-            "boundary_ratio": boundary_proximity,
             "js_boundary_ratio": js_boundary_ratio,
             "map_dx": map_dx,
             "map_dy": map_dy,
@@ -613,17 +674,17 @@ class SlitherEnv(gym.Env):
 
     def _compute_reward(self, info: dict) -> float:
         """
-        報酬を計算する。
+        報酬を計算する。config.py の REWARD_* パラメータを使用。
 
         報酬構成（成長・餌獲得重視設計）:
-          +0.1         生存報酬（小さめ。生きてるだけでは大きな報酬にならない）
-          +5.0 * delta 成長報酬（自機マスク面積増加。餌を食べて大きくなる＝高報酬）
-          +food_approach 餌接近報酬（最寄り餌に近づくと報酬、離れるとペナルティ）
-          -penalty     敵近接ペナルティ（100px 以内で線形）
-          -penalty     予測衝突リスクペナルティ（80px 以内、DLO ベース）
-          -penalty     壁接近ペナルティ（赤い境界検出、視覚ベース）
-          +center      中心誘導報酬（JS boundary_ratio、中心ほど高い）
-          -10.0        死亡ペナルティ（step() 側で加算）
+          +REWARD_SURVIVAL          生存報酬
+          +growth (area + score)    成長報酬（面積増加 + JSスコア増加）
+          +food_approach            餌接近報酬
+          -enemy_penalty            敵近接ペナルティ
+          -collision_penalty        予測衝突リスクペナルティ
+          -wall_penalty             壁接近ペナルティ
+          +center                   中心誘導報酬
+          REWARD_DEATH_*            死亡ペナルティ（step() 側で加算）
 
         Parameters
         ----------
@@ -637,35 +698,28 @@ class SlitherEnv(gym.Env):
         """
         reward = 0.0
 
-        # 生存報酬（控えめ: 生きてるだけでは稼げない、積極的に餌を取る必要がある）
-        r_survival = 0.1
+        # 生存報酬
+        r_survival = REWARD_SURVIVAL
         reward += r_survival
         self._reward_survival += r_survival
 
-        # 成長報酬（主要シグナル: 餌を食べて面積が増加 → 報酬）
+        # 成長報酬（JS スコア増加のみ。面積ベースはカメラズームで不安定なため廃止）
         r_growth = 0.0
-        # ゲームオーバーフレームは面積が誤検出されるため除外
         is_alive = info.get("js_playing", True)
-        current_area = info.get("area_px", 0.0) if is_alive else 0.0
-        if current_area > 0 and self._prev_area_px > 0:
-            delta_area = current_area - self._prev_area_px
-            if delta_area > 0:
-                r_growth = min(delta_area / 200.0, 3.0)
-        self._prev_area_px = current_area if current_area > 0 else self._prev_area_px
-
-        # JS スコアも補助的に使用（取れる場合のみ）
         current_score = info.get("score", 0) if is_alive else 0
+        # スコアが大幅減少（>50%）は JS 読み取りエラーとして無視
+        if current_score > 0 and self._prev_score > 0 and current_score < self._prev_score * 0.5:
+            current_score = self._prev_score  # 前回値を維持
         if current_score > 0 and current_score > self._prev_score:
-            r_growth += min(1.0 * (current_score - self._prev_score), 5.0)
+            r_growth = min(REWARD_GROWTH_SCORE_SCALE * (current_score - self._prev_score), REWARD_GROWTH_SCORE_CAP)
         if current_score > 0:
             self._prev_score = current_score
 
-        # 成長報酬のトータルキャップ（1ステップあたり最大5.0）
-        r_growth = min(r_growth, 5.0)
+        r_growth = min(r_growth, REWARD_GROWTH_TOTAL_CAP)
         reward += r_growth
         self._reward_growth += r_growth
 
-        # 餌接近報酬（最寄り餌に近づくことを報酬化 → 積極的移動を促進）
+        # 餌接近報酬
         r_food_approach = 0.0
         dlo_state = info.get("dlo_state")
         if dlo_state is not None and len(dlo_state.food_positions) > 0:
@@ -676,14 +730,17 @@ class SlitherEnv(gym.Env):
             )
             min_food_dist = float(np.min(food_dists))
             if self._prev_min_food_dist > 0:
-                # 近づいたら正の報酬、離れたら負の報酬
                 delta_dist = self._prev_min_food_dist - min_food_dist
-                r_food_approach = np.clip(delta_dist / 100.0, -0.3, 0.5)
+                r_food_approach = np.clip(
+                    delta_dist / 100.0 * REWARD_FOOD_APPROACH_SCALE,
+                    REWARD_FOOD_APPROACH_MIN,
+                    REWARD_FOOD_APPROACH_MAX,
+                )
             self._prev_min_food_dist = min_food_dist
         reward += r_food_approach
         self._reward_food_approach += r_food_approach
 
-        # 敵近接ペナルティ（現在位置ベース）
+        # 敵近接ペナルティ
         r_enemy = 0.0
         enemies = info.get("enemies")
         if enemies and len(enemies.enemy_centers) > 0:
@@ -693,12 +750,12 @@ class SlitherEnv(gym.Env):
                 + (enemies.enemy_centers[:, 1] - cy) ** 2
             )
             min_dist = np.min(dists)
-            if min_dist < 100:
-                r_enemy = -(100 - min_dist) / 100.0 * 0.5
+            if min_dist < REWARD_ENEMY_DIST_THRESH:
+                r_enemy = -(REWARD_ENEMY_DIST_THRESH - min_dist) / REWARD_ENEMY_DIST_THRESH * REWARD_ENEMY_MAX_PENALTY
         reward += r_enemy
         self._reward_enemy_penalty += r_enemy
 
-        # 予測衝突リスクペナルティ（DLO 予測ベース）
+        # 予測衝突リスクペナルティ
         r_collision = 0.0
         skeleton = info.get("skeleton")
         predicted_dlos = info.get("predicted_dlos", [])
@@ -712,29 +769,53 @@ class SlitherEnv(gym.Env):
                         + (pred.skeleton_yx[:, 1] - head_yx[1]) ** 2
                     )
                     min_pred_dist = min(min_pred_dist, float(np.min(d)))
-            if min_pred_dist < 80:
-                r_collision = -(80 - min_pred_dist) / 80.0 * 0.3
+            if min_pred_dist < REWARD_COLLISION_DIST_THRESH:
+                r_collision = -(REWARD_COLLISION_DIST_THRESH - min_pred_dist) / REWARD_COLLISION_DIST_THRESH * REWARD_COLLISION_MAX_PENALTY
         reward += r_collision
         self._reward_collision_penalty += r_collision
 
-        # 壁接近ペナルティ（画面の赤い境界を視覚検出）
-        # boundary_ratio: 0.0=赤なし(安全), 1.0=赤が大量(危険)
-        # 閾値を低くし、壁が少しでも見えたら早期にペナルティを与える
+        # 壁接近ペナルティ（JS ワールド座標ベース。赤ピクセル検出は敵誤認のため廃止）
         r_wall = 0.0
-        boundary_ratio = info.get("boundary_ratio", 0.0)
-        if boundary_ratio > 0.005:
-            r_wall = -boundary_ratio * 15.0 - (boundary_ratio ** 2) * 10.0  # 最大約 -25.0
+        js_boundary_ratio = info.get("js_boundary_ratio", -1.0)
+        if js_boundary_ratio >= 0.0 and js_boundary_ratio > REWARD_WALL_THRESH:
+            r_wall = -js_boundary_ratio * REWARD_WALL_LINEAR - (js_boundary_ratio ** 2) * REWARD_WALL_QUAD
+            print(
+                f"  [WALL] step={self._step_count} js_br={js_boundary_ratio:.3f} "
+                f"penalty={r_wall:+.3f} thresh={REWARD_WALL_THRESH}",
+                flush=True,
+            )
+        elif js_boundary_ratio >= 0.4:
+            # 閾値未満でも近づいている場合に警告
+            print(
+                f"  [WALL approaching] step={self._step_count} js_br={js_boundary_ratio:.3f} "
+                f"thresh={REWARD_WALL_THRESH}",
+                flush=True,
+            )
         reward += r_wall
         self._reward_wall_penalty += r_wall
 
-        # 中心誘導報酬（JS boundary_ratio: 0.0=中心, 1.0=境界）
-        # 中心に近いほど正の報酬。マップ全体の位置認識を促す。
+        # 中心誘導報酬
         r_center = 0.0
-        js_boundary_ratio = info.get("js_boundary_ratio", -1.0)
         if js_boundary_ratio >= 0.0:
-            r_center = (1.0 - js_boundary_ratio) * 0.05
+            r_center = (1.0 - js_boundary_ratio) * REWARD_CENTER_SCALE
         reward += r_center
         self._reward_center += r_center
+
+        # デバッグログ
+        if REWARD_DEBUG_LOG and self._step_count % 10 == 0:
+            print(
+                f"[Reward] step={self._step_count} "
+                f"total={reward:+.3f} "
+                f"surv={r_survival:+.3f} "
+                f"grow={r_growth:+.3f} "
+                f"food={r_food_approach:+.3f} "
+                f"enemy={r_enemy:+.3f} "
+                f"coll={r_collision:+.3f} "
+                f"wall={r_wall:+.3f} "
+                f"center={r_center:+.3f} "
+                f"score={info.get('score', 0)} "
+                f"js_br={js_boundary_ratio:.3f}"
+            )
 
         return reward
 

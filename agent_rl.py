@@ -31,6 +31,27 @@ def create_agent(env) -> PPO:
     PPO
         初期化された PPO モデル。
     """
+    # PPO ハイパーパラメータ:
+    #   n_steps=512:  更新前に512ステップ収集（64は少なすぎて勾配がノイジー）
+    #   batch_size=64: ミニバッチ
+    #   n_epochs=5:   各バッチの学習回数（10→5: 過学習防止）
+    #   gamma=0.995:  長期報酬を重視（エピソードが長いため）
+    #   gae_lambda=0.95: GAE のバイアス-分散トレードオフ
+    #   ent_coef=0.01: エントロピーボーナス（探索促進）
+    #   clip_range=0.2: PPO のクリッピング
+    common_kwargs = dict(
+        learning_rate=3e-4,
+        n_steps=512,
+        batch_size=64,
+        n_epochs=5,
+        gamma=0.995,
+        gae_lambda=0.95,
+        ent_coef=0.01,
+        clip_range=0.2,
+        device=RL_DEVICE,
+        verbose=1,
+    )
+
     if RL_OBS_MODE == "hybrid":
         policy_kwargs = {
             "features_extractor_kwargs": {"cnn_output_dim": CNN_FEATURES_DIM},
@@ -38,24 +59,14 @@ def create_agent(env) -> PPO:
         model = PPO(
             "MultiInputPolicy",
             env,
-            learning_rate=3e-4,
-            n_steps=64,
-            batch_size=32,
-            n_epochs=10,
             policy_kwargs=policy_kwargs,
-            device=RL_DEVICE,
-            verbose=1,
+            **common_kwargs,
         )
     else:
         model = PPO(
             "MlpPolicy",
             env,
-            learning_rate=3e-4,
-            n_steps=64,
-            batch_size=32,
-            n_epochs=10,
-            device=RL_DEVICE,
-            verbose=1,
+            **common_kwargs,
         )
     return model
 

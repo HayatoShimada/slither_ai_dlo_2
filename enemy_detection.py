@@ -17,6 +17,9 @@ from config import (
     ENEMY_MIN_AREA,
     ENEMY_SKELETON_POINTS,
     FOOD_MAX_AREA,
+    SHAPE_CIRCULARITY_THRESH,
+    SHAPE_ASPECT_RATIO_THRESH,
+    SHAPE_USE_FOR_CLASSIFICATION,
 )
 from dlo_instance import (
     DLOInstance,
@@ -70,13 +73,33 @@ def dlo_state_to_enemy_info(state: DLOState) -> EnemyInfo:
     )
 
 
+def _create_ui_mask(h: int, w: int) -> np.ndarray:
+    """slither.io の UI 領域をマスクする (255=UIエリア)。
+
+    Leaderboard (top-right), score text (bottom-left), minimap (bottom-right)
+    をマスクして DLO 検出から除外する。
+    """
+    mask = np.zeros((h, w), dtype=np.uint8)
+    # Leaderboard (top-right): x>65%, y<30%
+    mask[0:int(h * 0.30), int(w * 0.65):] = 255
+    # Score text (bottom-left): x<25%, y>82%
+    mask[int(h * 0.82):, 0:int(w * 0.25)] = 255
+    # Minimap (bottom-right): x>78%, y>72%
+    mask[int(h * 0.72):, int(w * 0.78):] = 255
+    return mask
+
+
 def detect_background_mask(
     bgr: np.ndarray,
     *,
     hsv_img: np.ndarray | None = None,
 ) -> np.ndarray:
     """
-    slither.io の背景（暗い六角格子）を HSV で検出する。
+    slither.io の背景（暗い六角格子 + 壁外 + UI 領域）を検出する。
+
+    slither.io の六角格子は彩度が高い暗青色 (H≈106, S≈143, V≈36)。
+    壁外の赤い領域も暗い (V≈40)。主に明度 (V) で背景を判定する。
+    食物やヘビは V>80 で光っているため区別できる。
 
     Parameters
     ----------
@@ -91,9 +114,28 @@ def detect_background_mask(
         背景マスク (0/255)。背景部分が 255。
     """
     hsv = hsv_img if hsv_img is not None else cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    lower = np.array(BG_HSV_LOWER, dtype=np.uint8)
-    upper = np.array(BG_HSV_UPPER, dtype=np.uint8)
-    mask = cv2.inRange(hsv, lower, upper)
+    h, w = bgr.shape[:2]
+
+    # Layer 1: 暗いピクセル (V <= 60) → 六角格子 (V≈36) + 壁外領域 (V≈40)
+    dark_mask = cv2.inRange(hsv, (0, 0, 0), (180, 255, 60))
+
+    # Layer 2: 低彩度・低明度 (従来のフォールバック)
+    low_sat_mask = cv2.inRange(
+        hsv,
+        np.array(BG_HSV_LOWER, dtype=np.uint8),
+        np.array(BG_HSV_UPPER, dtype=np.uint8),
+    )
+
+    # Layer 3: 壁境界のグローライン (H≈0/180 赤, S>220, V=60-150)
+    # 壁のグロー線は S≈250 で非常に高彩度。通常のヘビ (S<220) とは区別可能。
+    wall_glow1 = cv2.inRange(hsv, (0, 220, 60), (10, 255, 160))
+    wall_glow2 = cv2.inRange(hsv, (170, 220, 60), (180, 255, 160))
+    wall_glow_mask = wall_glow1 | wall_glow2
+
+    # Layer 4: UI 領域マスク
+    ui_mask = _create_ui_mask(h, w)
+
+    mask = dark_mask | low_sat_mask | wall_glow_mask | ui_mask
 
     # ノイズ除去
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -120,6 +162,54 @@ def _extract_enemy_skeleton(component_mask: np.ndarray) -> np.ndarray | None:
         return None
     points = skeleton_to_ordered_points(skel, ENEMY_SKELETON_POINTS)
     return points
+
+
+def _classify_by_shape(contour: np.ndarray, area: float) -> str:
+    """連結成分の形状特徴から敵ヘビか餌かを判定する。
+
+    判定基準:
+    - 円形度 (circularity): 4π × area / perimeter². 円=1.0, 細長い=低い値
+    - アスペクト比: 最小外接矩形の長辺/短辺. ヘビ=高い, 餌=~1.0
+
+    Parameters
+    ----------
+    contour : np.ndarray
+        輪郭 (cv2.findContours の出力)。
+    area : float
+        面積 (px²)。
+
+    Returns
+    -------
+    str
+        "enemy", "food", or "ambiguous" (面積ベースにフォールバック)。
+    """
+    if contour is None or len(contour) < 5:
+        return "ambiguous"
+
+    # 円形度
+    perimeter = cv2.arcLength(contour, closed=True)
+    if perimeter > 0:
+        circularity = 4.0 * np.pi * area / (perimeter * perimeter)
+    else:
+        circularity = 0.0
+
+    # アスペクト比（最小外接矩形）
+    rect = cv2.minAreaRect(contour)
+    w, h = rect[1]
+    if min(w, h) > 0:
+        aspect_ratio = max(w, h) / min(w, h)
+    else:
+        aspect_ratio = 1.0
+
+    # 分類ロジック
+    # 高円形度 & 低アスペクト比 → 餌
+    if circularity > SHAPE_CIRCULARITY_THRESH and aspect_ratio < SHAPE_ASPECT_RATIO_THRESH:
+        return "food"
+    # 低円形度 or 高アスペクト比 → ヘビ
+    if circularity < 0.3 or aspect_ratio > SHAPE_ASPECT_RATIO_THRESH:
+        return "enemy"
+
+    return "ambiguous"
 
 
 def detect_all_objects(
@@ -177,15 +267,33 @@ def detect_all_objects(
         cx = int(centroids[i][0])
         cy = int(centroids[i][1])
 
-        if area >= ENEMY_MIN_AREA:
-            # 敵ヘビ: マスク → 骨格抽出 → DLOInstance
-            component_mask = (labels == i).astype(np.uint8) * 255
+        if area <= 10:  # 極小ノイズは無視
+            continue
 
-            # 輪郭抽出（描画用）
-            contours, _ = cv2.findContours(
-                component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
-            )
-            contour = contours[0] if contours else None
+        # マスク・輪郭を先に計算（形状分類と敵DLO構築の両方で使う）
+        component_mask = (labels == i).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(
+            component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+        )
+        contour = contours[0] if contours else None
+
+        # 面積による初期分類
+        is_enemy_by_area = area >= ENEMY_MIN_AREA
+
+        # 形状ベース分類（有効時）
+        shape_class = "ambiguous"
+        if SHAPE_USE_FOR_CLASSIFICATION and area > 30 and contour is not None:
+            shape_class = _classify_by_shape(contour, float(area))
+
+        # 最終分類: 形状判定 > 面積判定
+        if shape_class == "food":
+            is_enemy = False
+        elif shape_class == "enemy":
+            is_enemy = True
+        else:
+            is_enemy = is_enemy_by_area
+
+        if is_enemy:
 
             # 骨格抽出
             skel_yx = _extract_enemy_skeleton(component_mask)
@@ -210,7 +318,7 @@ def detect_all_objects(
                 contour=contour,
                 is_self=False,
             ))
-        elif area > 10:  # 極小ノイズは無視
+        else:
             food_positions_list.append([cx, cy])
 
     # 自機 DLO

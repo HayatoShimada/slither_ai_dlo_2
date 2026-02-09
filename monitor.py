@@ -41,6 +41,7 @@ class RLInfo:
     step_count: int = 0
     episode_count: int = 0
     reward_history: list[float] = field(default_factory=list)
+    human_mode: bool = False
 
 
 def _resize_panel(image: np.ndarray) -> np.ndarray:
@@ -230,6 +231,13 @@ def _draw_rl_panel(rl_info: RLInfo) -> np.ndarray:
 
     cv2.putText(panel, "RL Status", (10, y), font, 0.6, (0, 200, 255), 2)
     y += line_h + 5
+
+    # モード表示
+    if rl_info.human_mode:
+        cv2.putText(panel, "Mode: HUMAN", (10, y), font, scale, (0, 255, 0), 2)
+    else:
+        cv2.putText(panel, "Mode: AI", (10, y), font, scale, (0, 200, 255), 1)
+    y += line_h
 
     cv2.putText(panel, f"Episode: {rl_info.episode_count}", (10, y), font, scale, color, 1)
     y += line_h

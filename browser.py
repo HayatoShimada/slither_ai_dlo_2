@@ -446,3 +446,34 @@ def dump_snake_properties(driver: webdriver.Chrome) -> None:
 def get_score(driver: webdriver.Chrome) -> int:
     """後方互換ラッパー。"""
     return get_game_state(driver)["score"]
+
+
+def inject_toggle_listener(driver: webdriver.Chrome) -> None:
+    """Tab キーで human_mode を切り替える JS リスナーをブラウザに注入する。
+
+    ページリロード後は再注入が必要。
+    """
+    try:
+        driver.execute_script("""
+            if (!window._toggle_listener_injected) {
+                window._human_mode = false;
+                document.addEventListener('keydown', function(e) {
+                    if (e.key === 'Tab') {
+                        e.preventDefault();
+                        window._human_mode = !window._human_mode;
+                        console.log('[Toggle] human_mode=' + window._human_mode);
+                    }
+                }, true);
+                window._toggle_listener_injected = true;
+            }
+        """)
+    except Exception:
+        pass
+
+
+def is_human_mode(driver: webdriver.Chrome) -> bool:
+    """現在人間モードかどうかを JS から取得する。"""
+    try:
+        return bool(driver.execute_script("return window._human_mode || false;"))
+    except Exception:
+        return False

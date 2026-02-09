@@ -14,6 +14,10 @@ except ImportError:
     mss = None
 
 
+# mss コンテキストを再利用してオーバーヘッドを削減
+_sctx = None
+
+
 def capture_screen(monitor: int | dict | None = None) -> np.ndarray:
     """
     画面をキャプチャし、BGR の numpy 配列で返す（OpenCV と互換）。
@@ -30,21 +34,24 @@ def capture_screen(monitor: int | dict | None = None) -> np.ndarray:
     np.ndarray
         shape (H, W, 3), dtype uint8, BGR.
     """
+    global _sctx
     if mss is None:
         raise ImportError("mss をインストールしてください: pip install mss")
 
-    with mss.mss() as sctx:
-        if isinstance(monitor, dict):
-            target = monitor
-        elif isinstance(monitor, int):
-            target = sctx.monitors[monitor]
-        else:
-            target = sctx.monitors[0]
+    if _sctx is None:
+        _sctx = mss.mss()
 
-        shot = sctx.grab(target)
-        # mss は BGRA。OpenCV は BGR なので A を落とす。
-        frame = np.array(shot)[:, :, :3]
-        return frame
+    if isinstance(monitor, dict):
+        target = monitor
+    elif isinstance(monitor, int):
+        target = _sctx.monitors[monitor]
+    else:
+        target = _sctx.monitors[0]
+
+    shot = _sctx.grab(target)
+    # mss は BGRA。OpenCV は BGR なので A を落とす。
+    frame = np.array(shot)[:, :, :3]
+    return frame
 
 
 def list_monitors() -> list[dict]:

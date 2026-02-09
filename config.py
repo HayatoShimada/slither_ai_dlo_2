@@ -49,8 +49,14 @@ SCREEN_HEIGHT = int(os.environ.get("SCREEN_HEIGHT", "720"))
 # --- 敵検出 ---
 BG_HSV_LOWER = (0, 0, 0)       # 背景の HSV 下限
 BG_HSV_UPPER = (180, 60, 80)   # 背景の HSV 上限 (低彩度・低明度)
-ENEMY_MIN_AREA = 300            # これ以上 = 敵ヘビ
-FOOD_MAX_AREA = 299             # これ以下 = 餌
+ENEMY_MIN_AREA = 300            # これ以上 = 敵ヘビ（形状判定も併用）
+FOOD_MAX_AREA = 299             # これ以下 = 餌（形状判定も併用）
+
+# --- DLO 形状分類（敵 vs 餌） ---
+# 面積だけでなく形状特徴で分類する。ヘビは細長く、餌は丸い。
+SHAPE_CIRCULARITY_THRESH = 0.55  # 円形度: これ以上 = 餌っぽい（完全円=1.0）
+SHAPE_ASPECT_RATIO_THRESH = 2.5  # アスペクト比: これ以上 = ヘビっぽい（細長い）
+SHAPE_USE_FOR_CLASSIFICATION = True  # True: 形状特徴を使って敵/餌を再分類する
 
 # --- DLO 追跡 ---
 ENEMY_SKELETON_POINTS = 20   # 敵骨格のサンプル点数（自機80より少ない、計算コスト削減）
@@ -91,3 +97,32 @@ CNN_INPUT_SIZE = (84, 84)
 CNN_FRAME_STACK = 4
 CNN_BATCH_SIZE = 256
 CNN_FEATURES_DIM = 256
+
+# --- 報酬パラメータ（調整しやすいようにここに集約） ---
+REWARD_SURVIVAL = 0.05          # 生存報酬 / step（控えめに。餌追従が主報酬）
+REWARD_GROWTH_SCORE_SCALE = 2.0 # JSスコア成長報酬のスケール（主要報酬）
+REWARD_GROWTH_SCORE_CAP = 5.0   # JSスコア成長報酬の上限 / step
+REWARD_GROWTH_TOTAL_CAP = 5.0   # 成長報酬合計の上限 / step
+REWARD_FOOD_APPROACH_SCALE = 3.0  # 餌接近報酬のスケール（強めに設定→餌に向かう行動を促進）
+REWARD_FOOD_APPROACH_MIN = -1.0 # 餌接近の下限（離れた時のペナルティ）
+REWARD_FOOD_APPROACH_MAX = 2.0  # 餌接近の上限（近づいた時の報酬）
+REWARD_ENEMY_DIST_THRESH = 80   # 敵近接ペナルティの距離閾値 (px, 狭めて本当に近い敵だけ)
+REWARD_ENEMY_MAX_PENALTY = 0.3  # 敵近接ペナルティ（控えめ。食物追跡が主目的）
+REWARD_COLLISION_DIST_THRESH = 60  # 衝突リスクの距離閾値 (px)
+REWARD_COLLISION_MAX_PENALTY = 0.2 # 衝突リスクの最大ペナルティ（控えめ）
+# ターン系報酬は廃止。餌接近報酬（距離ベース）に集中。
+REWARD_WALL_THRESH = 0.6       # 壁ペナルティ発動閾値 (JS boundary_ratio: 0=中心, 1=端)
+REWARD_WALL_LINEAR = 2.0       # 壁ペナルティの線形係数
+REWARD_WALL_QUAD = 5.0         # 壁ペナルティの二次係数
+REWARD_CENTER_SCALE = 0.05     # 中心誘導報酬のスケール
+REWARD_DEATH_NORMAL = -10.0    # 通常死ペナルティ
+REWARD_DEATH_WALL = -15.0      # 壁死ペナルティ（生存報酬取消に加算）
+REWARD_DEBUG_LOG = True         # True: ステップごとの報酬内訳をログ出力
+
+# --- 模倣学習 (Imitation Learning) ---
+IL_DEMO_DIR = os.environ.get("IL_DEMO_DIR", "demos")       # デモデータ保存ディレクトリ
+IL_RECORD_INTERVAL = 0.05       # 記録間隔 (秒)。ゲームの step と同じ 50ms
+IL_BC_EPOCHS = int(os.environ.get("IL_BC_EPOCHS", "50"))   # Behavioral Cloning のエポック数
+IL_BC_BATCH_SIZE = int(os.environ.get("IL_BC_BATCH_SIZE", "64"))   # BC バッチサイズ
+IL_BC_LR = float(os.environ.get("IL_BC_LR", "1e-3"))      # BC 学習率
+IL_MIN_DEMO_STEPS = 50          # これ未満のエピソードは保存しない（短すぎるデモを除外）

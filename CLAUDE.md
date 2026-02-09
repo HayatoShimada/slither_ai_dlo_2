@@ -20,6 +20,8 @@ Slither.io automation AI. The system captures the game screen, extracts the play
 ./scripts/run.sh             # 骨格可視化
 ./scripts/run.sh debug       # HSV デバッグ
 ./scripts/run.sh bot         # 自動運転 + 強化学習（venv が無い/壊れていれば setup を自動実行）
+./scripts/run.sh record      # 人間プレイを記録（模倣学習用デモデータ収集）
+./scripts/run.sh pretrain    # デモデータから Behavioral Cloning 事前訓練
 ```
 
 ```powershell
@@ -49,6 +51,19 @@ docker compose up --build
 # Access monitoring: http://localhost:6080 (noVNC)
 ```
 
+**模倣学習ワークフロー:**
+
+```bash
+# Step 1: 人間プレイを記録（noVNC http://localhost:6080 でプレイ）
+./scripts/run.sh record      # demos/ に .npz ファイルが保存される
+
+# Step 2: Behavioral Cloning で事前訓練
+./scripts/run.sh pretrain    # demos/ のデータで PPO ポリシーを教師あり学習
+
+# Step 3: RL ファインチューニング（BC 事前訓練済みモデルから継続）
+./scripts/run.sh bot         # models/slither_ppo.zip を読み込んで PPO 学習を継続
+```
+
 No test framework, linter, or build system is configured yet.
 
 ## Docker Setup
@@ -70,7 +85,7 @@ The Docker container includes:
 
 - `capture.py` — Screen capture via `mss`. Returns BGR numpy arrays. Supports full-screen, single monitor, or region capture.
 - `snake_skeleton.py` — Extraction pipeline: HSV color masking → morphological filtering → connected component analysis → skeletonization (scikit-image) → endpoint detection → BFS path tracing → uniform resampling. Returns `(N, 2)` array of ordered skeleton points.
-- `main.py` — Entry point. `run_visualization()` for normal mode, `run_debug_mask()` for HSV tuning, `run_bot()` for autonomous RL mode. Draws head (green), tail (red), body (blue) on the captured frame.
+- `main.py` — Entry point. `run_visualization()` for normal mode, `run_debug_mask()` for HSV tuning, `run_bot()` for autonomous RL mode, `run_record()` for imitation learning demo recording, `run_pretrain()` for Behavioral Cloning pre-training. Draws head (green), tail (red), body (blue) on the captured frame.
 - `config.py` — All tunable parameters: HSV ranges, morphological kernel size, min area threshold, skeleton sample count, capture monitor selection, browser/game settings, enemy detection thresholds, DLO tracking settings, RL hyperparameters. Supports environment variable overrides.
 - `browser.py` — Selenium-based Chromium control: driver creation, game start/restart, game state queries (playing, score).
 - `mouse_control.py` — pyautogui mouse control: angle-based movement, absolute positioning, boost on/off.
@@ -80,6 +95,8 @@ The Docker container includes:
 - `monitor.py` — Recognition monitoring window (2x2 grid): self-snake panel, enemy DLO panel (skeletons + IDs + velocity arrows + predicted positions), combined DLO overlay, RL status with reward graph.
 - `game_env.py` — Gymnasium environment wrapper. Observation: 252-dim vector (skeleton 160 + self meta 4 + enemy DLO meta 48 + nearest food 32 + collision risk 8). Action: continuous angle + boost. Reward: survival + food + enemy proximity penalty + predicted collision risk penalty + death.
 - `agent_rl.py` — PPO agent (Stable-Baselines3, CUDA/ROCm/CPU auto). Model creation, save/load, checkpoint callbacks, training loop.
+- `imitation_data.py` — Demo data recording and dataset management for imitation learning. `DemoRecorder` captures human gameplay (observation, action pairs) via mouse position tracking. `DemoDataset` loads and batches saved `.npz` demo files for training.
+- `imitation_learn.py` — Behavioral Cloning (BC) pre-training module. Trains PPO policy network with supervised learning on demo data. Angle uses sin/cos periodic loss, boost uses BCE loss. `pretrain_and_save()` provides end-to-end workflow.
 
 **Infrastructure:**
 
