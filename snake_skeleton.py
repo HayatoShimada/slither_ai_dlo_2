@@ -18,11 +18,22 @@ from config import (
 )
 
 
-def mask_snake_bgr(bgr: np.ndarray, hsv_lower: tuple, hsv_upper: tuple) -> np.ndarray:
+def mask_snake_bgr(
+    bgr: np.ndarray,
+    hsv_lower: tuple,
+    hsv_upper: tuple,
+    *,
+    hsv_img: np.ndarray | None = None,
+) -> np.ndarray:
     """
     BGR 画像からヘビの色領域のマスク（0/255）を返す。
+
+    Parameters
+    ----------
+    hsv_img : np.ndarray | None
+        事前計算済み HSV 画像。None の場合は内部で変換する。
     """
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    hsv = hsv_img if hsv_img is not None else cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     lower = np.array(hsv_lower, dtype=np.uint8)
     upper = np.array(hsv_upper, dtype=np.uint8)
     mask = cv2.inRange(hsv, lower, upper)

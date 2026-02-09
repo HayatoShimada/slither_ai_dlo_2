@@ -282,5 +282,9 @@ if __name__ == "__main__":
         run_debug_mask()
     elif mode == "bot":
         run_bot()
+    elif mode == "diag":
+        from diagnose_detection import run_diagnosis
+        image_path = sys.argv[2] if len(sys.argv) > 2 else None
+        run_diagnosis(image_path)
     else:
         run_visualization()

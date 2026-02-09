@@ -70,7 +70,11 @@ def dlo_state_to_enemy_info(state: DLOState) -> EnemyInfo:
     )
 
 
-def detect_background_mask(bgr: np.ndarray) -> np.ndarray:
+def detect_background_mask(
+    bgr: np.ndarray,
+    *,
+    hsv_img: np.ndarray | None = None,
+) -> np.ndarray:
     """
     slither.io の背景（暗い六角格子）を HSV で検出する。
 
@@ -78,13 +82,15 @@ def detect_background_mask(bgr: np.ndarray) -> np.ndarray:
     ----------
     bgr : np.ndarray
         BGR 画像 (H, W, 3)。
+    hsv_img : np.ndarray | None
+        事前計算済み HSV 画像。None の場合は内部で変換する。
 
     Returns
     -------
     np.ndarray
         背景マスク (0/255)。背景部分が 255。
     """
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    hsv = hsv_img if hsv_img is not None else cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     lower = np.array(BG_HSV_LOWER, dtype=np.uint8)
     upper = np.array(BG_HSV_UPPER, dtype=np.uint8)
     mask = cv2.inRange(hsv, lower, upper)
@@ -120,6 +126,8 @@ def detect_all_objects(
     bgr: np.ndarray,
     self_mask: np.ndarray,
     self_skeleton_yx: np.ndarray | None = None,
+    *,
+    hsv_img: np.ndarray | None = None,
 ) -> DLOState:
     """
     背景と自機を除外し、全ての検出物を DLO インスタンスとして返す。
@@ -136,13 +144,15 @@ def detect_all_objects(
         自機ヘビのマスク (0/255)。
     self_skeleton_yx : np.ndarray | None
         自機の骨格座標 (N, 2) (y, x)。None の場合、自機 DLO は None。
+    hsv_img : np.ndarray | None
+        事前計算済み HSV 画像。None の場合は内部で変換する。
 
     Returns
     -------
     DLOState
         全 DLO インスタンス + 餌の座標。
     """
-    bg_mask = detect_background_mask(bgr)
+    bg_mask = detect_background_mask(bgr, hsv_img=hsv_img)
 
     # 前景 = 背景でも自機でもない領域
     foreground = cv2.bitwise_and(

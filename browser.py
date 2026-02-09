@@ -131,12 +131,15 @@ def get_game_state(driver: webdriver.Chrome) -> dict:
     Returns
     -------
     dict
-        {"score": int, "boundary_ratio": float, "playing": bool}
+        {"score": int, "boundary_ratio": float, "map_dx": float,
+         "map_dy": float, "playing": bool}
+        boundary_ratio: 0.0=中心, 1.0=境界。-1.0=取得失敗。
+        map_dx, map_dy: マップ中心からの正規化座標 (-1.0〜+1.0)。
         取得失敗時はデフォルト値。
     """
     try:
         result = driver.execute_script("""
-            var out = {score: 0, boundary_ratio: -1, playing: false};
+            var out = {score: 0, boundary_ratio: -1, map_dx: 0, map_dy: 0, playing: false};
             out.playing = !!(window.playing);
 
             var s = window.snake;
@@ -147,15 +150,17 @@ def get_game_state(driver: webdriver.Chrome) -> dict:
             else if (s.fam && s.fam > 0) out.score = Math.floor(s.fam);
             else if (s.sct && s.sct > 0) out.score = s.sct;
 
-            // マップ位置 → 境界比率
-            var x = s.xx || s.x || 0;
-            var y = s.yy || s.y || 0;
-            if (x > 0 && y > 0) {
-                var grd = window.grd || 21600;
+            // マップ位置 → 境界比率 + 方向成分（複数プロパティ名に対応）
+            var x = (typeof s.xx === 'number') ? s.xx : (typeof s.x === 'number') ? s.x : (typeof s.gx === 'number') ? s.gx : NaN;
+            var y = (typeof s.yy === 'number') ? s.yy : (typeof s.y === 'number') ? s.y : (typeof s.gy === 'number') ? s.gy : NaN;
+            var grd = window.grd || window.gsc * 24000 || 21600;
+            if (grd > 0 && !isNaN(x) && !isNaN(y)) {
                 var dx = x - grd;
                 var dy = y - grd;
                 var dist = Math.sqrt(dx*dx + dy*dy);
                 out.boundary_ratio = Math.min(dist / grd, 1.0);
+                out.map_dx = Math.max(-1.0, Math.min(1.0, dx / grd));
+                out.map_dy = Math.max(-1.0, Math.min(1.0, dy / grd));
             }
             return out;
         """)
@@ -163,11 +168,13 @@ def get_game_state(driver: webdriver.Chrome) -> dict:
             return {
                 "score": int(result.get("score", 0)),
                 "boundary_ratio": float(result.get("boundary_ratio", -1.0)),
+                "map_dx": float(result.get("map_dx", 0.0)),
+                "map_dy": float(result.get("map_dy", 0.0)),
                 "playing": bool(result.get("playing", False)),
             }
     except Exception:
         pass
-    return {"score": 0, "boundary_ratio": -1.0, "playing": False}
+    return {"score": 0, "boundary_ratio": -1.0, "map_dx": 0.0, "map_dy": 0.0, "playing": False}
 
 
 def get_map_boundary_ratio(driver: webdriver.Chrome) -> float:

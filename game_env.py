@@ -26,13 +26,18 @@ from config import (
     CNN_INPUT_SIZE,
 )
 from capture import capture_screen
-from snake_skeleton import extract_snake_skeleton, mask_snake_bgr, largest_connected_component
+from snake_skeleton import (
+    mask_snake_bgr,
+    largest_connected_component,
+    mask_to_skeleton_binary,
+    skeleton_to_ordered_points,
+)
 from config import SNAKE_HSV_LOWER, SNAKE_HSV_UPPER, MIN_SNAKE_AREA
 from enemy_detection import detect_all_objects, dlo_state_to_enemy_info, EnemyInfo
 from dlo_instance import DLOInstance, DLOState
 from dlo_tracker import DLOTracker
 from mouse_control import move_to_angle, boost
-from browser import restart_game
+from browser import restart_game, is_game_over, get_game_state
 from color_detect import auto_detect_snake_color
 
 import cv2
@@ -62,19 +67,69 @@ def detect_game_over(frame: np.ndarray) -> bool:
     return mean_brightness < 30
 
 
-def detect_boundary_proximity(frame: np.ndarray) -> float:
+def _count_wall_pixels(region: np.ndarray) -> int:
+    """
+    端領域の赤マスクから壁帯状の連結成分だけのピクセル数を返す。
+
+    壁の赤帯は弧を描いて長く伸びる。赤い敵ヘビや餌はコンパクトな塊。
+    連結成分の bounding box の幅・高さのうち大きい方が領域サイズの
+    20% 以上であれば壁として採用する。弧は斜めに走る場合もあるため、
+    方向を限定せず max(幅, 高さ) で判定する。
+
+    Parameters
+    ----------
+    region : np.ndarray
+        端帯の赤マスク (uint8 0/255)。
+
+    Returns
+    -------
+    int
+        壁と判定された赤ピクセル数。
+    """
+    if np.count_nonzero(region) == 0:
+        return 0
+
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        region, connectivity=8,
+    )
+    # 長さ閾値: 領域の長辺の 20%
+    edge_length = max(region.shape[0], region.shape[1])
+    min_span = edge_length * 0.20
+
+    wall_pixels = 0
+    for i in range(1, n_labels):  # 0 は背景
+        bw = stats[i, cv2.CC_STAT_WIDTH]
+        bh = stats[i, cv2.CC_STAT_HEIGHT]
+        if max(bw, bh) >= min_span:
+            wall_pixels += stats[i, cv2.CC_STAT_AREA]
+    return wall_pixels
+
+
+def detect_boundary_proximity(
+    frame: np.ndarray,
+    *,
+    hsv_img: np.ndarray | None = None,
+) -> float:
     """
     画面内の赤い境界線を検出し、壁への近さを 0.0~1.0 で返す。
 
     slither.io のマップ境界は赤い帯として画面に表示される。
     画面の上下左右の端に赤いピクセルがどれだけあるかで判定する。
+    形状フィルタ: 連結成分の bounding box の幅・高さのうち大きい方が
+    領域サイズの 20% 以上のものだけを壁として採用し、赤い敵ヘビ・餌の
+    誤検出を排除する。弧形状の壁にも対応。
+
+    Parameters
+    ----------
+    hsv_img : np.ndarray | None
+        事前計算済み HSV 画像。None の場合は内部で変換する。
 
     Returns
     -------
     float
         0.0 = 境界なし（安全）, 1.0 = 画面の大部分が赤（危険）
     """
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    hsv = hsv_img if hsv_img is not None else cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     h, w = frame.shape[:2]
 
     # 赤色マスク（H が 0-10 または 170-180 の範囲）
@@ -85,20 +140,20 @@ def detect_boundary_proximity(frame: np.ndarray) -> float:
     # 画面の端 (上下左右の 15% 帯) の赤ピクセル比率を計算
     edge = int(min(h, w) * 0.15)
     regions = [
-        red_mask[:edge, :],          # 上端
-        red_mask[h - edge:, :],      # 下端
-        red_mask[:, :edge],          # 左端
-        red_mask[:, w - edge:],      # 右端
+        red_mask[:edge, :],       # 上端
+        red_mask[h - edge:, :],   # 下端
+        red_mask[:, :edge],       # 左端
+        red_mask[:, w - edge:],   # 右端
     ]
     total_pixels = 0
-    red_pixels = 0
+    wall_pixels = 0
     for region in regions:
         total_pixels += region.size
-        red_pixels += np.count_nonzero(region)
+        wall_pixels += _count_wall_pixels(region)
 
     if total_pixels == 0:
         return 0.0
-    ratio = red_pixels / total_pixels
+    ratio = wall_pixels / total_pixels
     # 赤が 1% 以上あれば壁が見えている。10% で最大危険度
     return min(ratio / 0.10, 1.0)
 
@@ -108,16 +163,17 @@ class SlitherEnv(gym.Env):
     slither.io 用 Gymnasium 環境（DLO 統合版）。
 
     観測空間:
-      vector モード (252 次元):
+      vector モード (254 次元):
         自機骨格:       80 × 2 = 160
         自機メタ:       heading + length + velocity(2) = 4
         敵 DLO top-K=8: 各 (center_dx, center_dy, heading, length, vel_dx, vel_dy) = 6 × 8 = 48
         最寄り餌:       16 × 2 = 32
         予測衝突リスク: top-K 敵ごとの最短距離予測 = 8
+        マップ位置:     JS 経由のマップ中心からの正規化座標 (dx, dy) = 2
 
       hybrid モード (Dict):
         image:    (84, 84, 1) uint8 グレースケール（VecFrameStack で 4 枚積み重ね）
-        metadata: (60,) float32 = self_meta(4) + enemy_dlo(48) + collision_risk(8)
+        metadata: (62,) float32 = self_meta(4) + enemy_dlo(48) + collision_risk(8) + map_pos(2)
 
     行動空間:
         Box(2): [angle (0~360), boost (0~1)]
@@ -131,9 +187,10 @@ class SlitherEnv(gym.Env):
     ENEMY_DLO_DIM = TOP_K_ENEMIES * 6          # 8 * 6 = 48
     FOOD_DIM = TOP_M_FOOD * 2                  # 16 * 2 = 32
     COLLISION_RISK_DIM = TOP_K_ENEMIES          # 8
-    OBS_DIM = SKELETON_DIM + SELF_META_DIM + ENEMY_DLO_DIM + FOOD_DIM + COLLISION_RISK_DIM  # 252
-    # hybrid モードのメタデータ次元: self_meta + enemy_dlo + collision_risk
-    METADATA_DIM = SELF_META_DIM + ENEMY_DLO_DIM + COLLISION_RISK_DIM  # 60
+    MAP_POS_DIM = 2                             # マップ位置 (dx, dy)
+    OBS_DIM = SKELETON_DIM + SELF_META_DIM + ENEMY_DLO_DIM + FOOD_DIM + COLLISION_RISK_DIM + MAP_POS_DIM  # 254
+    # hybrid モードのメタデータ次元: self_meta + enemy_dlo + collision_risk + map_pos
+    METADATA_DIM = SELF_META_DIM + ENEMY_DLO_DIM + COLLISION_RISK_DIM + MAP_POS_DIM  # 62
 
     def __init__(
         self,
@@ -197,6 +254,7 @@ class SlitherEnv(gym.Env):
         self._reward_enemy_penalty = 0.0
         self._reward_collision_penalty = 0.0
         self._reward_wall_penalty = 0.0
+        self._reward_center = 0.0
         self._prev_frame_small: np.ndarray | None = None
         self._stale_frame_count = 0
         self._last_enemies: EnemyInfo | None = None
@@ -225,10 +283,10 @@ class SlitherEnv(gym.Env):
             "enemy": self._reward_enemy_penalty,
             "collision": self._reward_collision_penalty,
             "wall": self._reward_wall_penalty,
+            "center": self._reward_center,
         }
 
         # ゲームオーバー判定（画像 + JS フォールバック）
-        from browser import is_game_over
         frame = capture_screen()
         if detect_game_over(frame) or is_game_over(self.driver):
             restart_game(self.driver)
@@ -254,11 +312,24 @@ class SlitherEnv(gym.Env):
         self._reward_enemy_penalty = 0.0
         self._reward_collision_penalty = 0.0
         self._reward_wall_penalty = 0.0
+        self._reward_center = 0.0
         # 画面フリーズ検出をリセット
         self._prev_frame_small = None
         self._stale_frame_count = 0
         # 追跡器をリセット（新エピソードでは ID を引き継がない）
         self._tracker = DLOTracker()
+
+        # JS 動作検証ログ（エピソード開始時にマップ座標が取れるか確認）
+        js_state = get_game_state(self.driver)
+        br = js_state["boundary_ratio"]
+        hint = " (JS位置なし→画面の赤で壁ペナルティ)" if br < 0 else ""
+        print(
+            f"[JS check] boundary_ratio={br:.3f} "
+            f"map_dx={js_state.get('map_dx', 'N/A')} "
+            f"map_dy={js_state.get('map_dy', 'N/A')} "
+            f"score={js_state['score']} playing={js_state['playing']}{hint}",
+            flush=True,
+        )
 
         obs, info = self._get_observation()
         return obs, info
@@ -293,9 +364,9 @@ class SlitherEnv(gym.Env):
         # 報酬計算
         reward = self._compute_reward(info)
 
-        # 終了判定（JS 主体 + フレーム差分による画面フリーズ検出）
-        from browser import is_game_over
-        js_game_over = is_game_over(self.driver)
+        # 終了判定（JS playing フラグ + フレーム差分による画面フリーズ検出）
+        # _get_observation() 内の get_game_state() 結果を再利用（JS 呼び出し削減）
+        js_game_over = not info.get("js_playing", True)
 
         # フレーム全体の画素差分で画面が動いているか判定
         # 通常プレイ中は背景・餌・他ヘビで常に変化する。
@@ -321,8 +392,12 @@ class SlitherEnv(gym.Env):
         if self._step_count % 10 == 0 or terminated:
             area = info.get("area_px", 0)
             wall = info.get("boundary_ratio", 0)
+            js_br = info.get("js_boundary_ratio", -1)
+            mdx = info.get("map_dx", 0)
+            mdy = info.get("map_dy", 0)
             print(
                 f"  [step {self._step_count}] area={area:.0f} wall={wall:.2f} "
+                f"js_br={js_br:.2f} map=({mdx:.2f},{mdy:.2f}) "
                 f"fdiff={frame_diff:.1f} js_over={js_game_over} "
                 f"stale={self._stale_frame_count}"
                 f"{'  >>> GAME OVER' if terminated else ''}",
@@ -371,8 +446,8 @@ class SlitherEnv(gym.Env):
         """
         現在のゲーム状態から観測を構築する。
 
-        vector モード: 正規化された 252 次元ベクトル。
-        hybrid モード: {"image": (84,84,1) uint8, "metadata": (60,) float32}。
+        vector モード: 正規化された 254 次元ベクトル。
+        hybrid モード: {"image": (84,84,1) uint8, "metadata": (62,) float32}。
 
         Returns
         -------
@@ -382,19 +457,24 @@ class SlitherEnv(gym.Env):
         frame = capture_screen()
         self._last_frame = frame
 
-        # 自機骨格抽出
-        skeleton_yx = extract_snake_skeleton(
-            frame, hsv_lower=self._hsv_lower, hsv_upper=self._hsv_upper,
-        )
-        self._last_skeleton = skeleton_yx
+        # HSV 変換を1回だけ実行（全検出処理で共有）
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        # 自機マスク
-        mask = mask_snake_bgr(frame, self._hsv_lower, self._hsv_upper)
+        # 自機マスク（HSV 再利用、1回だけ計算）
+        mask = mask_snake_bgr(frame, self._hsv_lower, self._hsv_upper, hsv_img=hsv)
         self_mask = largest_connected_component(mask, MIN_SNAKE_AREA)
         self._last_self_mask = self_mask
 
-        # DLO ベースの全オブジェクト検出
-        dlo_state = detect_all_objects(frame, self_mask, skeleton_yx)
+        # 自機骨格抽出（マスクから直接。HSV変換・マスク計算の重複を排除）
+        if np.sum(self_mask) > 0:
+            skel_bin = mask_to_skeleton_binary(self_mask)
+            skeleton_yx = skeleton_to_ordered_points(skel_bin, SKELETON_SAMPLE_POINTS)
+        else:
+            skeleton_yx = None
+        self._last_skeleton = skeleton_yx
+
+        # DLO ベースの全オブジェクト検出（HSV 再利用）
+        dlo_state = detect_all_objects(frame, self_mask, skeleton_yx, hsv_img=hsv)
         self._last_dlo_state = dlo_state
 
         # 後方互換用 EnemyInfo
@@ -486,8 +566,18 @@ class SlitherEnv(gym.Env):
         length_px = dlo_state.self_dlo.length if dlo_state.self_dlo is not None else 0.0
         area_px = float(np.sum(self_mask > 0)) if self_mask is not None else 0.0
 
-        # 壁検出（画面の赤い境界を視覚検出。JS 不要）
-        boundary_proximity = detect_boundary_proximity(frame)
+        # 壁検出（HSV 再利用。報酬計算用）
+        boundary_proximity = detect_boundary_proximity(frame, hsv_img=hsv)
+
+        # 6. マップ位置 (2 dim): JS 経由のマップ中心からの正規化座標
+        js_state = get_game_state(self.driver)
+        js_boundary_ratio = js_state["boundary_ratio"]
+        map_dx = js_state.get("map_dx", 0.0)
+        map_dy = js_state.get("map_dy", 0.0)
+        map_pos_vec = np.array(
+            [np.clip(map_dx, -1.0, 1.0), np.clip(map_dy, -1.0, 1.0)],
+            dtype=np.float32,
+        )
 
         info = {
             "frame": frame,
@@ -496,20 +586,24 @@ class SlitherEnv(gym.Env):
             "enemies": enemies,
             "dlo_state": dlo_state,
             "predicted_dlos": predicted_dlos,
-            "score": 0,
+            "score": js_state["score"],
             "length_px": length_px,
             "area_px": area_px,
             "boundary_ratio": boundary_proximity,
+            "js_boundary_ratio": js_boundary_ratio,
+            "map_dx": map_dx,
+            "map_dy": map_dy,
+            "js_playing": js_state.get("playing", False),
         }
 
         if self._obs_mode == "hybrid":
             # CNN 用画像 + メタデータ (骨格・食物は画像から学習するため除外)
             image = self._preprocess_frame(frame)
-            metadata = np.concatenate([self_meta, enemy_dlo_vec, collision_risk])
+            metadata = np.concatenate([self_meta, enemy_dlo_vec, collision_risk, map_pos_vec])
             metadata = np.clip(metadata, -1.0, 1.0)
             obs = {"image": image, "metadata": metadata}
         else:
-            obs = np.concatenate([skel_norm, self_meta, enemy_dlo_vec, food_vec, collision_risk])
+            obs = np.concatenate([skel_norm, self_meta, enemy_dlo_vec, food_vec, collision_risk, map_pos_vec])
             obs = np.clip(obs, -1.0, 1.0)
 
         return obs, info
@@ -524,7 +618,8 @@ class SlitherEnv(gym.Env):
           +food_approach 餌接近報酬（最寄り餌に近づくと報酬、離れるとペナルティ）
           -penalty     敵近接ペナルティ（100px 以内で線形）
           -penalty     予測衝突リスクペナルティ（80px 以内、DLO ベース）
-          -penalty     壁接近ペナルティ（赤い境界検出）
+          -penalty     壁接近ペナルティ（赤い境界検出、視覚ベース）
+          +center      中心誘導報酬（JS boundary_ratio、中心ほど高い）
           -10.0        死亡ペナルティ（step() 側で加算）
 
         Parameters
@@ -616,12 +711,22 @@ class SlitherEnv(gym.Env):
 
         # 壁接近ペナルティ（画面の赤い境界を視覚検出）
         # boundary_ratio: 0.0=赤なし(安全), 1.0=赤が大量(危険)
+        # 閾値を低くし、壁が少しでも見えたら早期にペナルティを与える
         r_wall = 0.0
         boundary_ratio = info.get("boundary_ratio", 0.0)
-        if boundary_ratio > 0.02:
-            r_wall = -boundary_ratio * 10.0 - (boundary_ratio ** 2) * 5.0  # 最大 -15.0
+        if boundary_ratio > 0.005:
+            r_wall = -boundary_ratio * 15.0 - (boundary_ratio ** 2) * 10.0  # 最大約 -25.0
         reward += r_wall
         self._reward_wall_penalty += r_wall
+
+        # 中心誘導報酬（JS boundary_ratio: 0.0=中心, 1.0=境界）
+        # 中心に近いほど正の報酬。マップ全体の位置認識を促す。
+        r_center = 0.0
+        js_boundary_ratio = info.get("js_boundary_ratio", -1.0)
+        if js_boundary_ratio >= 0.0:
+            r_center = (1.0 - js_boundary_ratio) * 0.05
+        reward += r_center
+        self._reward_center += r_center
 
         return reward
 
@@ -669,4 +774,5 @@ class SlitherEnv(gym.Env):
             "enemy": self._reward_enemy_penalty,
             "collision": self._reward_collision_penalty,
             "wall": self._reward_wall_penalty,
+            "center": self._reward_center,
         })
