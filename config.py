@@ -61,8 +61,27 @@ DLO_MATCH_MAX_DIST = 200     # マッチング最大距離 (px)
 # --- 強化学習 ---
 RL_MODEL_DIR = os.environ.get("RL_MODEL_DIR", "models")
 RL_SAVE_INTERVAL = int(os.environ.get("RL_SAVE_INTERVAL", "10000"))
-# MlpPolicy は CPU の方が効くことが多い。GPU 警告を消すなら "cpu"、GPU を使うなら "cuda" / "auto"
-RL_DEVICE = os.environ.get("RL_DEVICE", "auto")
+
+
+def _detect_device() -> str:
+    """GPU デバイスを自動検出する。CUDA (NVIDIA) / ROCm (AMD) → 'cuda', それ以外 → 'cpu'。"""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            name = torch.cuda.get_device_name(0) if torch.cuda.device_count() > 0 else "unknown"
+            # ROCm は torch.cuda API 経由でアクセスされる（HIP バックエンド）
+            backend = "ROCm" if hasattr(torch.version, "hip") and torch.version.hip else "CUDA"
+            print(f"[GPU] {backend} device detected: {name}")
+            return "cuda"
+    except Exception:
+        pass
+    print("[GPU] No GPU detected, using CPU")
+    return "cpu"
+
+
+# "auto" の場合は実際にデバイスを検出してログ出力する
+_rl_device_env = os.environ.get("RL_DEVICE", "auto")
+RL_DEVICE = _detect_device() if _rl_device_env == "auto" else _rl_device_env
 TOP_K_ENEMIES = 8
 TOP_M_FOOD = 16
 

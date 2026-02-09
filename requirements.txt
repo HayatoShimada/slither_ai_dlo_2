@@ -19,4 +19,4 @@ selenium>=4.15.0
 # 強化学習
 gymnasium>=0.29.0
 stable-baselines3>=2.2.0
-torch>=2.1.0
+# torch は GPU 種別に応じて Dockerfile 内で別途インストール（CUDA / ROCm / CPU）

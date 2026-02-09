@@ -1,4 +1,6 @@
-FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+FROM ubuntu:22.04
+
+ARG GPU_TYPE=cpu
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -56,7 +58,18 @@ ENV MKL_NUM_THREADS=1
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir --upgrade pip \
     && pip3 install --no-cache-dir -r requirements.txt
-RUN pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121
+
+# Install PyTorch based on GPU type (nvidia / amd / cpu)
+RUN if [ "$GPU_TYPE" = "nvidia" ]; then \
+        echo "Installing PyTorch with CUDA (NVIDIA) support..." && \
+        pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121; \
+    elif [ "$GPU_TYPE" = "amd" ]; then \
+        echo "Installing PyTorch with ROCm (AMD) support..." && \
+        pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/rocm6.2; \
+    else \
+        echo "Installing PyTorch (CPU only)..." && \
+        pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu; \
+    fi
 
 # Copy source code
 COPY . .

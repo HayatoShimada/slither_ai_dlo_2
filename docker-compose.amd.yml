@@ -1,0 +1,10 @@
+# AMD GPU (ROCm) オーバーライド
+# 使い方: GPU_TYPE=amd docker compose -f docker-compose.yml -f docker-compose.amd.yml up --build
+services:
+  slither-bot:
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render

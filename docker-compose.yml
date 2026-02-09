@@ -1,13 +1,15 @@
 services:
   slither-bot:
-    build: .
+    build:
+      context: .
+      args:
+        GPU_TYPE: ${GPU_TYPE:-cpu}
     ports:
       - "6080:6080"
     environment:
       DISPLAY: ":99"
       SCREEN_WIDTH: "1280"
       SCREEN_HEIGHT: "720"
-      NVIDIA_VISIBLE_DEVICES: "all"
       PYTHONUNBUFFERED: "1"
     volumes:
       - .:/app
@@ -15,10 +17,3 @@ services:
     # "can't start new thread" 対策（matplotlib / PyTorch 等がスレッドを多用するため）
     ulimits:
       nproc: 8192
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]

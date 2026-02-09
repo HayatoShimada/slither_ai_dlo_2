@@ -1,6 +1,7 @@
 """
 PPO 強化学習エージェントモジュール。
-Stable-Baselines3 + PyTorch CUDA で slither.io を学習する。
+Stable-Baselines3 + PyTorch で slither.io を学習する。
+GPU は CUDA (NVIDIA) / ROCm (AMD) / CPU を自動検出。
 """
 
 from __future__ import annotations

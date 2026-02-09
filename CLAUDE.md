@@ -27,9 +27,13 @@ python main.py debug
 # Run (bot mode - Docker container, RL training)
 python main.py bot
 
-# Docker (full autonomous setup with GPU)
-docker compose build
-docker compose up
+# Docker (full autonomous setup)
+# NVIDIA GPU:
+GPU_TYPE=nvidia docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up --build
+# AMD GPU (Radeon/ROCm):
+GPU_TYPE=amd docker compose -f docker-compose.yml -f docker-compose.amd.yml up --build
+# CPU only:
+docker compose up --build
 
 # Access monitoring via browser
 # http://localhost:6080 (noVNC)
@@ -39,14 +43,14 @@ No test framework, linter, or build system is configured yet.
 
 ## Docker Setup
 
-**Requirements:** Docker with NVIDIA Container Toolkit (for GPU passthrough).
+**Requirements:** Docker. GPU利用時は NVIDIA Container Toolkit (NVIDIA) または ROCm (AMD) が必要。CPU のみでも動作する。
 
 The Docker container includes:
 - **Xvfb** (virtual display 1280x720)
 - **x11vnc + noVNC** (port 6080 for remote monitoring)
 - **Chromium** (Selenium-driven, playing slither.io)
 - **Python pipeline** (capture → detection → RL → control)
-- **GPU** (CUDA for PyTorch PPO training)
+- **GPU** (CUDA/ROCm/CPU auto-detect for PyTorch PPO training)
 
 `docker compose up` starts all services. Connect to `http://localhost:6080` to observe the game and recognition monitor via VNC.
 
@@ -65,12 +69,14 @@ The Docker container includes:
 - `enemy_detection.py` — Enemy/food detection via background subtraction + self-mask exclusion + connected component analysis. `detect_all_objects()` returns `DLOState` with enemy skeletons extracted. `detect_enemies_and_food()` remains as backward-compatible wrapper returning `EnemyInfo`.
 - `monitor.py` — Recognition monitoring window (2x2 grid): self-snake panel, enemy DLO panel (skeletons + IDs + velocity arrows + predicted positions), combined DLO overlay, RL status with reward graph.
 - `game_env.py` — Gymnasium environment wrapper. Observation: 252-dim vector (skeleton 160 + self meta 4 + enemy DLO meta 48 + nearest food 32 + collision risk 8). Action: continuous angle + boost. Reward: survival + food + enemy proximity penalty + predicted collision risk penalty + death.
-- `agent_rl.py` — PPO agent (Stable-Baselines3, CUDA). Model creation, save/load, checkpoint callbacks, training loop.
+- `agent_rl.py` — PPO agent (Stable-Baselines3, CUDA/ROCm/CPU auto). Model creation, save/load, checkpoint callbacks, training loop.
 
 **Infrastructure:**
 
-- `Dockerfile` — nvidia/cuda:12.2.0-runtime-ubuntu22.04 with Xvfb, x11vnc, noVNC, Chromium, Python.
-- `docker-compose.yml` — GPU passthrough, port mapping, shared memory.
+- `Dockerfile` — Ubuntu 22.04 with Xvfb, x11vnc, noVNC, Chromium, Python. GPU_TYPE build arg for NVIDIA/AMD/CPU PyTorch.
+- `docker-compose.yml` — Base config (no GPU). Use with override files for GPU.
+- `docker-compose.nvidia.yml` — NVIDIA GPU overlay (nvidia driver, CUDA).
+- `docker-compose.amd.yml` — AMD GPU overlay (ROCm, /dev/kfd + /dev/dri).
 - `entrypoint.sh` — Startup orchestration: Xvfb → x11vnc → noVNC → python3 main.py bot.
 
 ## Key Conventions
@@ -91,6 +97,6 @@ The Docker container includes:
 
 ## Dependencies
 
-Core: `mss` (screen capture), `opencv-python` (image processing), `numpy`, `scikit-image` (skeletonization), `scipy` (Hungarian matching for DLO tracking), `pyautogui` (mouse control), `selenium` (browser automation), `gymnasium` (RL environment), `stable-baselines3` (PPO), `torch` (CUDA training).
+Core: `mss` (screen capture), `opencv-python` (image processing), `numpy`, `scikit-image` (skeletonization), `scipy` (Hungarian matching for DLO tracking), `pyautogui` (mouse control), `selenium` (browser automation), `gymnasium` (RL environment), `stable-baselines3` (PPO), `torch` (GPU/CPU training).
 
-PyTorch CUDA version is installed separately in the Dockerfile via `--index-url`.
+PyTorch is installed separately in the Dockerfile based on `GPU_TYPE` build arg: `nvidia` → CUDA wheels, `amd` → ROCm wheels, `cpu` (default) → CPU-only wheels.

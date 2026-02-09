@@ -1,0 +1,13 @@
+# NVIDIA GPU オーバーライド
+# 使い方: GPU_TYPE=nvidia docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up --build
+services:
+  slither-bot:
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -53,6 +53,23 @@ echo "  リモート:    http://<このサーバのIP>:6080"
 echo "  例:          http://192.168.1.10:6080"
 echo "  (サーバのIPは hostname -I で確認)"
 echo "=============================================="
+
+# GPU 環境検出ログ
+echo "--- GPU Environment ---"
+if command -v nvidia-smi &>/dev/null; then
+    echo "[GPU] NVIDIA GPU detected:"
+    nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null || echo "  nvidia-smi available but query failed"
+elif [ -e /dev/kfd ]; then
+    echo "[GPU] AMD GPU (ROCm) detected:"
+    if command -v rocm-smi &>/dev/null; then
+        rocm-smi --showproductname 2>/dev/null || echo "  rocm-smi available but query failed"
+    else
+        echo "  /dev/kfd exists (ROCm device available)"
+    fi
+else
+    echo "[GPU] No GPU device found, using CPU"
+fi
+echo "-----------------------"
 echo "Launching bot..."
 
 # コンテナのスレッド数制限を引き上げ（matplotlib / PyTorch の "can't start new thread" 対策）

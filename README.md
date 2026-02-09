@@ -5,7 +5,7 @@ Slither.io のヘビを **RT-DLO (Real-Time Deformable Linear Objects)** の考�
 ## アーキテクチャ
 
 ```
-Docker コンテナ (nvidia/cuda + Ubuntu 22.04)
+Docker コンテナ (Ubuntu 22.04 + NVIDIA/AMD/CPU 自動対応)
 ├── Xvfb :99 (仮想ディスプレイ 1280×720)
 ├── x11vnc + noVNC (port 6080 で外部モニタリング)
 ├── Chromium (Selenium 経由で slither.io を自動操作)
@@ -38,13 +38,33 @@ Docker コンテナ (nvidia/cuda + Ubuntu 22.04)
 
 ### Docker（推奨・GPU 自動運転）
 
+GPU 環境に合わせて起動方法を選択してください。
+
+#### NVIDIA GPU
+
 **前提**: Docker + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/) がインストール済み。
 
 ```bash
-# ビルド & 起動
-docker compose build
-docker compose up
+GPU_TYPE=nvidia docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up --build
+```
 
+#### AMD GPU (Radeon / ROCm)
+
+**前提**: Docker + [ROCm](https://rocm.docs.amd.com/) がインストール済み。`/dev/kfd` と `/dev/dri` へのアクセスが必要。
+
+```bash
+GPU_TYPE=amd docker compose -f docker-compose.yml -f docker-compose.amd.yml up --build
+```
+
+#### CPU のみ
+
+```bash
+docker compose up --build
+```
+
+#### 共通
+
+```bash
 # ブラウザで認識モニタを確認
 # 同じマシン: http://localhost:6080/vnc.html
 # リモート:   http://<サーバのIP>:6080
@@ -53,14 +73,14 @@ docker compose up
 **「compose build requires buildx 0.17.0 or later」と出る場合**:
 
 ```bash
-docker build -t slither_ai_dlo-slither-bot .
+GPU_TYPE=nvidia docker build --build-arg GPU_TYPE=nvidia -t slither_ai_dlo-slither-bot .
 docker compose up
 ```
 
 **「RuntimeError: can't start new thread」で pip が落ちる場合**:
 
 ```bash
-docker build --ulimit nproc=8192:8192 -t slither_ai_dlo-slither-bot .
+docker build --ulimit nproc=8192:8192 --build-arg GPU_TYPE=nvidia -t slither_ai_dlo-slither-bot .
 ```
 
 コンテナ内で自動的に Xvfb → VNC → Chromium → ゲーム開始 → RL 学習が始まります。
@@ -242,8 +262,8 @@ noVNC (`http://localhost:6080`) で 2×2 グリッドを表示。
 | 要素 | 使用ツール |
 |------|-----------|
 | 言語 | Python 3.8+ |
-| コンテナ | Docker + NVIDIA Container Toolkit |
-| GPU | CUDA 12.2 (PyTorch) |
+| コンテナ | Docker (+ NVIDIA Container Toolkit or ROCm) |
+| GPU | CUDA (NVIDIA) / ROCm (AMD) / CPU 自動検出 |
 | 仮想ディスプレイ | Xvfb + x11vnc + noVNC |
 | ブラウザ | Chromium + Selenium |
 | 画面取得 | mss |
@@ -272,7 +292,7 @@ noVNC (`http://localhost:6080`) で 2×2 グリッドを表示。
 ## 注意事項
 
 - **座標系**: 内部は (y, x) numpy 順。OpenCV 描画は (x, y)。DLO の center/velocity は (x, y) float64。
-- **GPU**: Bot モードは NVIDIA GPU (CUDA) を前提。CPU のみでも動作するが学習速度は低下。
+- **GPU**: NVIDIA (CUDA) / AMD (ROCm) / CPU を自動検出。GPU があれば学習を高速化。CPU のみでも動作するが学習速度は低下。
 - **共有メモリ**: Docker の `shm_size: 2g` は Chromium のクラッシュ防止に必要。
 
 ## Git にアップロードする前の初期化手順
