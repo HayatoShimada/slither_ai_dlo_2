@@ -371,17 +371,18 @@ def run_bot():
     ブラウザ起動 → ゲーム開始 → PPO 学習ループを実行する。
     model.learn() により重み更新が自動で行われる。
     """
+    import os
     import time
 
     from browser import create_driver, start_game
-    from config import RL_OBS_MODE, CNN_FRAME_STACK
+    from config import RL_OBS_MODE, CNN_FRAME_STACK, RL_MODEL_DIR
     from game_env import SlitherEnv
     from agent_rl import create_agent, load_model, save_model
     from dlo_tracker import DLOTracker
     from monitor import update_monitor, RLInfo
-    from mouse_control import boost
+    from mouse_control import boost, set_driver as _set_mouse_driver
     from stable_baselines3.common.callbacks import BaseCallback
-    from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecNormalize
 
     class EpisodeLogCallback(BaseCallback):
         """エピソード終了ごとにログを出力するコールバック。"""
@@ -475,11 +476,10 @@ def run_bot():
                 try:
                     rb = base_env.reward_breakdown
                     rb_str = (
-                        f"  [surv={rb['survival']:+.1f} "
-                        f"grow={rb['growth']:+.1f} "
-                        f"food={rb.get('food', 0):+.1f} "
-                        f"enemy={rb['enemy']:+.1f} "
-                        f"coll={rb['collision']:+.1f} "
+                        f"  [grow={rb['growth']:+.1f} "
+                        f"kill={rb['kill']:+.1f} "
+                        f"idle={rb['idle']:+.1f} "
+                        f"enemy={rb['enemy_danger']:+.1f} "
                         f"wall={rb['wall']:+.1f}]"
                     )
                 except Exception:
@@ -500,6 +500,9 @@ def run_bot():
             if self.num_timesteps % self._save_interval == 0 and self.num_timesteps > 0:
                 print(f"[Save] step={self.num_timesteps} -> models/")
                 self.model.save("models/slither_ppo")
+                # VecNormalize の統計も定期保存
+                if isinstance(self.training_env, VecNormalize):
+                    self.training_env.save("models/vecnormalize.pkl")
 
             return True
 
@@ -557,6 +560,7 @@ def run_bot():
     print("Starting browser...")
 
     driver = create_driver()
+    _set_mouse_driver(driver)
     model = None
     try:
         start_game(driver)
@@ -588,7 +592,21 @@ def run_bot():
             venv = VecFrameStack(venv, n_stack=CNN_FRAME_STACK, channels_order="last")
             train_env = venv
         else:
-            train_env = env
+            train_env = DummyVecEnv([lambda e=env: e])
+
+        # VecNormalize: 報酬を自動正規化して PPO の安定性を向上
+        vecnorm_path = os.path.join(RL_MODEL_DIR, "vecnormalize.pkl")
+        if os.path.exists(vecnorm_path):
+            print(f"Loading VecNormalize stats from {vecnorm_path}")
+            train_env = VecNormalize.load(vecnorm_path, train_env)
+            train_env.training = True
+            train_env.norm_reward = True
+        else:
+            train_env = VecNormalize(
+                train_env, norm_obs=False, norm_reward=True,
+                clip_reward=10.0, gamma=0.99,
+            )
+        print(f"VecNormalize enabled (norm_obs=False, norm_reward=True)")
 
         print("Loading or creating RL agent...")
         model = load_model(train_env)
@@ -624,6 +642,10 @@ def run_bot():
     finally:
         if model is not None:
             save_model(model)
+            # VecNormalize の統計も保存
+            if isinstance(train_env, VecNormalize):
+                train_env.save(vecnorm_path)
+                print(f"VecNormalize stats saved to {vecnorm_path}")
         driver.quit()
         print("Bot stopped.")
 

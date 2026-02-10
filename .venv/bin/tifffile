@@ -1,4 +1,4 @@
-#!/home/ayato/repos/slither_ai_dlo_2/.venv/bin/python3
+#!/home/user/repos/slither_ai_dlo/.venv/bin/python3
 import sys
 from tifffile import main
 if __name__ == '__main__':

@@ -24,23 +24,18 @@ from config import (
     AUTO_DETECT_COLOR,
     RL_OBS_MODE,
     CNN_INPUT_SIZE,
-    REWARD_SURVIVAL,
     REWARD_GROWTH_SCORE_SCALE,
     REWARD_GROWTH_SCORE_CAP,
     REWARD_GROWTH_TOTAL_CAP,
-    REWARD_FOOD_APPROACH_SCALE,
-    REWARD_FOOD_APPROACH_MIN,
-    REWARD_FOOD_APPROACH_MAX,
+    REWARD_KILL,
+    KILL_DETECT_RADIUS,
+    REWARD_IDLE_GRACE_STEPS,
+    REWARD_IDLE_PENALTY,
     REWARD_ENEMY_DIST_THRESH,
     REWARD_ENEMY_MAX_PENALTY,
-    REWARD_COLLISION_DIST_THRESH,
-    REWARD_COLLISION_MAX_PENALTY,
     REWARD_WALL_THRESH,
-    REWARD_WALL_LINEAR,
-    REWARD_WALL_QUAD,
-    REWARD_CENTER_SCALE,
-    REWARD_DEATH_NORMAL,
-    REWARD_DEATH_WALL,
+    REWARD_WALL_MAX,
+    REWARD_DEATH,
     REWARD_DEBUG_LOG,
 )
 from capture import capture_screen
@@ -54,8 +49,8 @@ from config import SNAKE_HSV_LOWER, SNAKE_HSV_UPPER, MIN_SNAKE_AREA
 from enemy_detection import detect_all_objects, dlo_state_to_enemy_info, EnemyInfo
 from dlo_instance import DLOInstance, DLOState
 from dlo_tracker import DLOTracker
-from mouse_control import move_to_angle, boost
-from browser import restart_game, is_game_over, get_game_state
+from mouse_control import move_to_angle, boost, set_driver as _set_mouse_driver
+from browser import restart_game, is_game_over, get_game_state, get_js_entities
 from color_detect import auto_detect_snake_color
 
 import cv2
@@ -232,6 +227,7 @@ class SlitherEnv(gym.Env):
         super().__init__()
 
         self.driver = driver
+        _set_mouse_driver(driver)
         self._tracker = tracker if tracker is not None else DLOTracker()
         self._hsv_lower = hsv_lower or SNAKE_HSV_LOWER
         self._hsv_upper = hsv_upper or SNAKE_HSV_UPPER
@@ -266,18 +262,18 @@ class SlitherEnv(gym.Env):
         self._prev_score = 0
         self._prev_length_px = 0.0
         self._prev_area_px = 0.0
-        self._prev_min_food_dist = 0.0
         self._step_count = 0
+        self._steps_since_growth = 0
+        self._prev_tracked_enemy_ids: dict[int, DLOInstance] = {}
         # 報酬コンポーネント累計（エピソードログ用）
-        self._reward_survival = 0.0
         self._reward_growth = 0.0
-        self._reward_food_approach = 0.0
-        self._reward_enemy_penalty = 0.0
-        self._reward_collision_penalty = 0.0
+        self._reward_kill = 0.0
+        self._reward_idle = 0.0
+        self._reward_enemy_danger = 0.0
         self._reward_wall_penalty = 0.0
-        self._reward_center = 0.0
         self._prev_frame_small: np.ndarray | None = None
         self._stale_frame_count = 0
+        self._cached_js_entities: dict = {}
         self._last_enemies: EnemyInfo | None = None
         self._last_self_mask: np.ndarray | None = None
         self._last_skeleton: np.ndarray | None = None
@@ -298,13 +294,11 @@ class SlitherEnv(gym.Env):
 
         # リセット前に報酬内訳を保存（SB3 が auto-reset するため）
         self._saved_reward_breakdown = {
-            "survival": self._reward_survival,
             "growth": self._reward_growth,
-            "food": self._reward_food_approach,
-            "enemy": self._reward_enemy_penalty,
-            "collision": self._reward_collision_penalty,
+            "kill": self._reward_kill,
+            "idle": self._reward_idle,
+            "enemy_danger": self._reward_enemy_danger,
             "wall": self._reward_wall_penalty,
-            "center": self._reward_center,
         }
 
         # ゲームオーバー判定（画像 + JS フォールバック）
@@ -322,18 +316,18 @@ class SlitherEnv(gym.Env):
         self._prev_score = 0
         self._prev_length_px = 0.0
         self._prev_area_px = 0.0
-        self._prev_min_food_dist = 0.0
         self._step_count = 0
-        self._reward_survival = 0.0
+        self._steps_since_growth = 0
+        self._prev_tracked_enemy_ids = {}
         self._reward_growth = 0.0
-        self._reward_food_approach = 0.0
-        self._reward_enemy_penalty = 0.0
-        self._reward_collision_penalty = 0.0
+        self._reward_kill = 0.0
+        self._reward_idle = 0.0
+        self._reward_enemy_danger = 0.0
         self._reward_wall_penalty = 0.0
-        self._reward_center = 0.0
         # 画面フリーズ検出をリセット
         self._prev_frame_small = None
         self._stale_frame_count = 0
+        self._cached_js_entities = {}
         # 追跡器をリセット（新エピソードでは ID を引き継がない）
         self._tracker = DLOTracker()
 
@@ -440,26 +434,13 @@ class SlitherEnv(gym.Env):
 
         if terminated:
             js_br = info.get("js_boundary_ratio", -1.0)
-            # 壁死判定: JS boundary_ratio > 0.85 (マップ端 15% 以内)
-            if js_br > 0.85:
-                # 壁死: 生存報酬を全取り消し + 重い死亡ペナルティ
-                reward += -self._reward_survival  # 生存報酬ゼロ化
-                reward += REWARD_DEATH_WALL
-                self._reward_wall_penalty += -self._reward_survival + REWARD_DEATH_WALL
-                self._reward_survival = 0.0
-                print(
-                    f"  [WALL DEATH] step={self._step_count} js_br={js_br:.3f} "
-                    f"penalty={REWARD_DEATH_WALL} (survival cancelled)",
-                    flush=True,
-                )
-            else:
-                # 通常死（敵衝突等）
-                reward += REWARD_DEATH_NORMAL
-                print(
-                    f"  [DEATH] step={self._step_count} js_br={js_br:.3f} "
-                    f"penalty={REWARD_DEATH_NORMAL} (normal death)",
-                    flush=True,
-                )
+            reward += REWARD_DEATH
+            cause = "wall" if js_br > 0.85 else "collision"
+            print(
+                f"  [DEATH:{cause}] step={self._step_count} js_br={js_br:.3f} "
+                f"penalty={REWARD_DEATH}",
+                flush=True,
+            )
             boost(False)  # ブースト解除
 
         self._step_count += 1
@@ -532,6 +513,15 @@ class SlitherEnv(gym.Env):
 
         # DLO ベースの全オブジェクト検出（HSV 再利用）
         dlo_state = detect_all_objects(frame, self_mask, skeleton_yx, hsv_img=hsv)
+
+        # JS injection による敵・食物検出（ビジョン検出を補完）
+        js_ent = self._cached_js_entities
+        if self._step_count % 3 == 0:
+            js_ent = get_js_entities(self.driver)
+            self._cached_js_entities = js_ent
+        if js_ent and js_ent.get("ok"):
+            dlo_state = self._merge_js_entities(dlo_state, js_ent)
+
         self._last_dlo_state = dlo_state
 
         # 後方互換用 EnemyInfo
@@ -672,19 +662,134 @@ class SlitherEnv(gym.Env):
 
         return obs, info
 
+    def _merge_js_entities(
+        self, dlo_state: DLOState, js_ent: dict,
+    ) -> DLOState:
+        """
+        JS injection で取得した敵・食物データをビジョン検出結果に統合する。
+
+        JS の敵座標はビジョン検出で見逃した敵を補完する。
+        ビジョンで既に検出済みの敵（中心距離が近い）は重複追加しない。
+        食物はJS検出を優先し、ビジョン検出をフォールバックとする。
+
+        Parameters
+        ----------
+        dlo_state : DLOState
+            ビジョンベース検出結果。
+        js_ent : dict
+            get_js_entities() の戻り値。
+
+        Returns
+        -------
+        DLOState
+            JS データで補完された DLOState。
+        """
+        from dlo_instance import compute_heading, compute_length, compute_center_xy
+
+        # --- 食物: JS 検出が利用可能ならそちらを優先 ---
+        js_foods = js_ent.get("foods", [])
+        if js_foods:
+            food_positions = np.array(js_foods, dtype=np.int32)
+        else:
+            food_positions = dlo_state.food_positions
+
+        # --- 敵: JS 検出をビジョン検出に追加（重複排除） ---
+        js_enemies = js_ent.get("enemies", [])
+        merged_enemies = list(dlo_state.enemy_dlos)  # ビジョン検出を保持
+        dup_thresh = 60.0  # この距離以内なら同一敵と判定 (px)
+
+        for je in js_enemies:
+            sx = je.get("sx", 0)
+            sy = je.get("sy", 0)
+
+            # ビジョン検出済みの敵と重複チェック
+            is_duplicate = False
+            for existing in merged_enemies:
+                dx = existing.center[0] - sx
+                dy = existing.center[1] - sy
+                if dx * dx + dy * dy < dup_thresh * dup_thresh:
+                    is_duplicate = True
+                    break
+
+            if not is_duplicate:
+                # JS のみで検出された敵 → 1点骨格の DLOInstance を生成
+                skel_yx = np.array([[sy, sx]], dtype=np.int32)
+                center = np.array([sx, sy], dtype=np.float64)
+                heading = float(je.get("heading", 0.0))
+                # sct (segment count) を長さの近似に使用
+                length_estimate = float(je.get("length", 0)) * 3.0
+
+                merged_enemies.append(DLOInstance(
+                    instance_id=-1,
+                    skeleton_yx=skel_yx,
+                    heading=heading,
+                    length=length_estimate,
+                    center=center,
+                    contour=None,
+                    is_self=False,
+                ))
+
+        return DLOState(
+            self_dlo=dlo_state.self_dlo,
+            enemy_dlos=merged_enemies,
+            food_positions=food_positions,
+        )
+
+    def _detect_kills(self, dlo_state: DLOState | None) -> int:
+        """
+        敵キルを検出する。DLO トラッカーの ID 消失 + 自機ヘッド近接で判定。
+
+        Parameters
+        ----------
+        dlo_state : DLOState or None
+            現在フレームの DLO 状態。
+
+        Returns
+        -------
+        int
+            検出されたキル数。
+        """
+        if dlo_state is None:
+            return 0
+
+        current_ids = {e.instance_id for e in dlo_state.enemy_dlos}
+        kills = 0
+        head_yx = (
+            self._last_skeleton[0]
+            if self._last_skeleton is not None and len(self._last_skeleton) > 0
+            else None
+        )
+
+        for eid, prev_enemy in self._prev_tracked_enemy_ids.items():
+            if eid not in current_ids and head_yx is not None:
+                # 消滅した敵が自機ヘッド近くにいたかチェック
+                # center は (x, y) なので (y, x) に変換
+                enemy_center_yx = np.array([prev_enemy.center[1], prev_enemy.center[0]])
+                dist = float(np.linalg.norm(head_yx - enemy_center_yx))
+                if dist < KILL_DETECT_RADIUS:
+                    kills += 1
+                    print(
+                        f"  [KILL] step={self._step_count} enemy_id={eid} "
+                        f"dist={dist:.0f}px",
+                        flush=True,
+                    )
+
+        self._prev_tracked_enemy_ids = {
+            e.instance_id: e for e in dlo_state.enemy_dlos
+        }
+        return kills
+
     def _compute_reward(self, info: dict) -> float:
         """
-        報酬を計算する。config.py の REWARD_* パラメータを使用。
+        報酬を計算する。シンプル5コンポーネント設計。
 
-        報酬構成（成長・餌獲得重視設計）:
-          +REWARD_SURVIVAL          生存報酬
-          +growth (area + score)    成長報酬（面積増加 + JSスコア増加）
-          +food_approach            餌接近報酬
-          -enemy_penalty            敵近接ペナルティ
-          -collision_penalty        予測衝突リスクペナルティ
-          -wall_penalty             壁接近ペナルティ
-          +center                   中心誘導報酬
-          REWARD_DEATH_*            死亡ペナルティ（step() 側で加算）
+        報酬構成:
+          +growth       成長報酬（JSスコア増加）
+          +kill         キル報酬（敵消滅検出）
+          -idle         怠慢ペナルティ（長時間成長なし）
+          -enemy_danger 敵危険ペナルティ（近接敵への線形ペナルティ）
+          -wall         壁接近ペナルティ（シンプル線形）
+          REWARD_DEATH  死亡ペナルティ（step() 側で加算）
 
         Parameters
         ----------
@@ -698,121 +803,101 @@ class SlitherEnv(gym.Env):
         """
         reward = 0.0
 
-        # 生存報酬
-        r_survival = REWARD_SURVIVAL
-        reward += r_survival
-        self._reward_survival += r_survival
-
-        # 成長報酬（JS スコア増加のみ。面積ベースはカメラズームで不安定なため廃止）
+        # --- 成長報酬（JSスコア増加） ---
         r_growth = 0.0
         is_alive = info.get("js_playing", True)
         current_score = info.get("score", 0) if is_alive else 0
         # スコアが大幅減少（>50%）は JS 読み取りエラーとして無視
         if current_score > 0 and self._prev_score > 0 and current_score < self._prev_score * 0.5:
-            current_score = self._prev_score  # 前回値を維持
+            current_score = self._prev_score
         if current_score > 0 and current_score > self._prev_score:
-            r_growth = min(REWARD_GROWTH_SCORE_SCALE * (current_score - self._prev_score), REWARD_GROWTH_SCORE_CAP)
+            r_growth = min(
+                REWARD_GROWTH_SCORE_SCALE * (current_score - self._prev_score),
+                REWARD_GROWTH_SCORE_CAP,
+            )
+            self._steps_since_growth = 0  # 成長したのでリセット
         if current_score > 0:
             self._prev_score = current_score
-
         r_growth = min(r_growth, REWARD_GROWTH_TOTAL_CAP)
         reward += r_growth
         self._reward_growth += r_growth
 
-        # 餌接近報酬
-        r_food_approach = 0.0
+        # --- キル報酬（敵消滅検出） ---
+        r_kill = 0.0
         dlo_state = info.get("dlo_state")
-        if dlo_state is not None and len(dlo_state.food_positions) > 0:
-            cx, cy = SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2
-            food_dists = np.sqrt(
-                (dlo_state.food_positions[:, 0] - cx) ** 2
-                + (dlo_state.food_positions[:, 1] - cy) ** 2
-            )
-            min_food_dist = float(np.min(food_dists))
-            if self._prev_min_food_dist > 0:
-                delta_dist = self._prev_min_food_dist - min_food_dist
-                r_food_approach = np.clip(
-                    delta_dist / 100.0 * REWARD_FOOD_APPROACH_SCALE,
-                    REWARD_FOOD_APPROACH_MIN,
-                    REWARD_FOOD_APPROACH_MAX,
-                )
-            self._prev_min_food_dist = min_food_dist
-        reward += r_food_approach
-        self._reward_food_approach += r_food_approach
+        kills = self._detect_kills(dlo_state)
+        if kills > 0:
+            r_kill = REWARD_KILL * kills
+        reward += r_kill
+        self._reward_kill += r_kill
 
-        # 敵近接ペナルティ
-        r_enemy = 0.0
-        enemies = info.get("enemies")
-        if enemies and len(enemies.enemy_centers) > 0:
-            cx, cy = SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2
-            dists = np.sqrt(
-                (enemies.enemy_centers[:, 0] - cx) ** 2
-                + (enemies.enemy_centers[:, 1] - cy) ** 2
-            )
-            min_dist = np.min(dists)
-            if min_dist < REWARD_ENEMY_DIST_THRESH:
-                r_enemy = -(REWARD_ENEMY_DIST_THRESH - min_dist) / REWARD_ENEMY_DIST_THRESH * REWARD_ENEMY_MAX_PENALTY
-        reward += r_enemy
-        self._reward_enemy_penalty += r_enemy
+        # --- 怠慢ペナルティ ---
+        r_idle = 0.0
+        self._steps_since_growth += 1
+        if self._steps_since_growth > REWARD_IDLE_GRACE_STEPS:
+            r_idle = -REWARD_IDLE_PENALTY
+        reward += r_idle
+        self._reward_idle += r_idle
 
-        # 予測衝突リスクペナルティ
-        r_collision = 0.0
+        # --- 敵危険ペナルティ（敵近接 + 予測骨格を統合） ---
+        r_enemy_danger = 0.0
+        min_enemy_dist = float("inf")
+
+        # 予測骨格を優先（前方予測で早めに回避）
         skeleton = info.get("skeleton")
         predicted_dlos = info.get("predicted_dlos", [])
         if skeleton is not None and len(skeleton) > 0 and predicted_dlos:
             head_yx = skeleton[0]
-            min_pred_dist = float("inf")
             for pred in predicted_dlos:
                 if pred.skeleton_yx is not None and len(pred.skeleton_yx) > 0:
                     d = np.sqrt(
                         (pred.skeleton_yx[:, 0] - head_yx[0]) ** 2
                         + (pred.skeleton_yx[:, 1] - head_yx[1]) ** 2
                     )
-                    min_pred_dist = min(min_pred_dist, float(np.min(d)))
-            if min_pred_dist < REWARD_COLLISION_DIST_THRESH:
-                r_collision = -(REWARD_COLLISION_DIST_THRESH - min_pred_dist) / REWARD_COLLISION_DIST_THRESH * REWARD_COLLISION_MAX_PENALTY
-        reward += r_collision
-        self._reward_collision_penalty += r_collision
+                    min_enemy_dist = min(min_enemy_dist, float(np.min(d)))
 
-        # 壁接近ペナルティ（JS ワールド座標ベース。赤ピクセル検出は敵誤認のため廃止）
+        # 予測が無い場合は現在の敵中心位置でフォールバック
+        if min_enemy_dist == float("inf"):
+            enemies = info.get("enemies")
+            if enemies and len(enemies.enemy_centers) > 0:
+                cx, cy = SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2
+                dists = np.sqrt(
+                    (enemies.enemy_centers[:, 0] - cx) ** 2
+                    + (enemies.enemy_centers[:, 1] - cy) ** 2
+                )
+                min_enemy_dist = float(np.min(dists))
+
+        if min_enemy_dist < REWARD_ENEMY_DIST_THRESH:
+            r_enemy_danger = (
+                -(REWARD_ENEMY_DIST_THRESH - min_enemy_dist)
+                / REWARD_ENEMY_DIST_THRESH
+                * REWARD_ENEMY_MAX_PENALTY
+            )
+        reward += r_enemy_danger
+        self._reward_enemy_danger += r_enemy_danger
+
+        # --- 壁接近ペナルティ（シンプル線形） ---
         r_wall = 0.0
         js_boundary_ratio = info.get("js_boundary_ratio", -1.0)
         if js_boundary_ratio >= 0.0 and js_boundary_ratio > REWARD_WALL_THRESH:
-            r_wall = -js_boundary_ratio * REWARD_WALL_LINEAR - (js_boundary_ratio ** 2) * REWARD_WALL_QUAD
-            print(
-                f"  [WALL] step={self._step_count} js_br={js_boundary_ratio:.3f} "
-                f"penalty={r_wall:+.3f} thresh={REWARD_WALL_THRESH}",
-                flush=True,
-            )
-        elif js_boundary_ratio >= 0.4:
-            # 閾値未満でも近づいている場合に警告
-            print(
-                f"  [WALL approaching] step={self._step_count} js_br={js_boundary_ratio:.3f} "
-                f"thresh={REWARD_WALL_THRESH}",
-                flush=True,
+            r_wall = (
+                -(js_boundary_ratio - REWARD_WALL_THRESH)
+                / (1.0 - REWARD_WALL_THRESH)
+                * REWARD_WALL_MAX
             )
         reward += r_wall
         self._reward_wall_penalty += r_wall
-
-        # 中心誘導報酬
-        r_center = 0.0
-        if js_boundary_ratio >= 0.0:
-            r_center = (1.0 - js_boundary_ratio) * REWARD_CENTER_SCALE
-        reward += r_center
-        self._reward_center += r_center
 
         # デバッグログ
         if REWARD_DEBUG_LOG and self._step_count % 10 == 0:
             print(
                 f"[Reward] step={self._step_count} "
                 f"total={reward:+.3f} "
-                f"surv={r_survival:+.3f} "
                 f"grow={r_growth:+.3f} "
-                f"food={r_food_approach:+.3f} "
-                f"enemy={r_enemy:+.3f} "
-                f"coll={r_collision:+.3f} "
+                f"kill={r_kill:+.3f} "
+                f"idle={r_idle:+.3f} "
+                f"enemy={r_enemy_danger:+.3f} "
                 f"wall={r_wall:+.3f} "
-                f"center={r_center:+.3f} "
                 f"score={info.get('score', 0)} "
                 f"js_br={js_boundary_ratio:.3f}"
             )
@@ -857,11 +942,9 @@ class SlitherEnv(gym.Env):
     @property
     def _last_reward_breakdown(self) -> dict[str, float]:
         return getattr(self, '_saved_reward_breakdown', {
-            "survival": self._reward_survival,
             "growth": self._reward_growth,
-            "food": self._reward_food_approach,
-            "enemy": self._reward_enemy_penalty,
-            "collision": self._reward_collision_penalty,
+            "kill": self._reward_kill,
+            "idle": self._reward_idle,
+            "enemy_danger": self._reward_enemy_danger,
             "wall": self._reward_wall_penalty,
-            "center": self._reward_center,
         })

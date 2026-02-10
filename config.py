@@ -46,6 +46,15 @@ NICKNAME = os.environ.get("NICKNAME", "AI_Bot")
 SCREEN_WIDTH = int(os.environ.get("SCREEN_WIDTH", "1280"))
 SCREEN_HEIGHT = int(os.environ.get("SCREEN_HEIGHT", "720"))
 
+# ローカル実行時に headless モードでブラウザを起動するか自動判定する。
+# Docker (Xvfb) 内では headed で VNC 表示、ローカルでは headless でフォーカス奪取を防止。
+# HEADLESS_BROWSER=true/false で明示的に上書き可能。
+_headless_env = os.environ.get("HEADLESS_BROWSER", "auto")
+if _headless_env == "auto":
+    HEADLESS_BROWSER = not os.path.exists("/.dockerenv")
+else:
+    HEADLESS_BROWSER = _headless_env.lower() in ("true", "1", "yes")
+
 # --- 敵検出 ---
 BG_HSV_LOWER = (0, 0, 0)       # 背景の HSV 下限
 BG_HSV_UPPER = (180, 60, 80)   # 背景の HSV 上限 (低彩度・低明度)
@@ -98,26 +107,26 @@ CNN_FRAME_STACK = 4
 CNN_BATCH_SIZE = 256
 CNN_FEATURES_DIM = 256
 
-# --- 報酬パラメータ（調整しやすいようにここに集約） ---
-REWARD_SURVIVAL = 0.05          # 生存報酬 / step（控えめに。餌追従が主報酬）
-REWARD_GROWTH_SCORE_SCALE = 2.0 # JSスコア成長報酬のスケール（主要報酬）
-REWARD_GROWTH_SCORE_CAP = 5.0   # JSスコア成長報酬の上限 / step
-REWARD_GROWTH_TOTAL_CAP = 5.0   # 成長報酬合計の上限 / step
-REWARD_FOOD_APPROACH_SCALE = 3.0  # 餌接近報酬のスケール（強めに設定→餌に向かう行動を促進）
-REWARD_FOOD_APPROACH_MIN = -1.0 # 餌接近の下限（離れた時のペナルティ）
-REWARD_FOOD_APPROACH_MAX = 2.0  # 餌接近の上限（近づいた時の報酬）
-REWARD_ENEMY_DIST_THRESH = 80   # 敵近接ペナルティの距離閾値 (px, 狭めて本当に近い敵だけ)
-REWARD_ENEMY_MAX_PENALTY = 0.3  # 敵近接ペナルティ（控えめ。食物追跡が主目的）
-REWARD_COLLISION_DIST_THRESH = 60  # 衝突リスクの距離閾値 (px)
-REWARD_COLLISION_MAX_PENALTY = 0.2 # 衝突リスクの最大ペナルティ（控えめ）
-# ターン系報酬は廃止。餌接近報酬（距離ベース）に集中。
-REWARD_WALL_THRESH = 0.6       # 壁ペナルティ発動閾値 (JS boundary_ratio: 0=中心, 1=端)
-REWARD_WALL_LINEAR = 2.0       # 壁ペナルティの線形係数
-REWARD_WALL_QUAD = 5.0         # 壁ペナルティの二次係数
-REWARD_CENTER_SCALE = 0.05     # 中心誘導報酬のスケール
-REWARD_DEATH_NORMAL = -10.0    # 通常死ペナルティ
-REWARD_DEATH_WALL = -15.0      # 壁死ペナルティ（生存報酬取消に加算）
-REWARD_DEBUG_LOG = True         # True: ステップごとの報酬内訳をログ出力
+# --- 報酬パラメータ（シンプル5コンポーネント設計） ---
+# 成長報酬（JSスコア増加が主要報酬）
+REWARD_GROWTH_SCORE_SCALE = 1.0 # JSスコア成長報酬のスケール
+REWARD_GROWTH_SCORE_CAP = 1.0   # JSスコア成長報酬の上限 / step
+REWARD_GROWTH_TOTAL_CAP = 1.0   # 成長報酬合計の上限 / step
+# キル報酬（敵消滅検出: DLO ID消失 + 自機ヘッド近接）
+REWARD_KILL = 2.0               # キル報酬（高価値イベント）
+KILL_DETECT_RADIUS = 150        # キル検出半径 (px)
+# 怠慢ペナルティ（長時間成長なしで発動→受動戦略を排除）
+REWARD_IDLE_GRACE_STEPS = 100   # 怠慢ペナルティ猶予ステップ数
+REWARD_IDLE_PENALTY = 0.02      # 怠慢ペナルティ / step
+# 敵危険ペナルティ（旧: 敵近接 + 衝突予測を統合）
+REWARD_ENEMY_DIST_THRESH = 60   # 敵危険ペナルティの距離閾値 (px)
+REWARD_ENEMY_MAX_PENALTY = 0.5  # 敵危険ペナルティの最大値
+# 壁ペナルティ（シンプル線形。旧: 線形+二次から縮小）
+REWARD_WALL_THRESH = 0.7        # 壁ペナルティ発動閾値 (JS boundary_ratio: 0=中心, 1=端)
+REWARD_WALL_MAX = 1.0           # 壁ペナルティの最大値
+# 死亡ペナルティ（壁死/通常死を統一）
+REWARD_DEATH = -5.0             # 死亡ペナルティ（統一）
+REWARD_DEBUG_LOG = True          # True: ステップごとの報酬内訳をログ出力
 
 # --- 模倣学習 (Imitation Learning) ---
 IL_DEMO_DIR = os.environ.get("IL_DEMO_DIR", "demos")       # デモデータ保存ディレクトリ

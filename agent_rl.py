@@ -32,22 +32,24 @@ def create_agent(env) -> PPO:
         初期化された PPO モデル。
     """
     # PPO ハイパーパラメータ:
-    #   n_steps=512:  更新前に512ステップ収集（64は少なすぎて勾配がノイジー）
-    #   batch_size=64: ミニバッチ
-    #   n_epochs=5:   各バッチの学習回数（10→5: 過学習防止）
-    #   gamma=0.995:  長期報酬を重視（エピソードが長いため）
+    #   n_steps=1024: 安定した勾配推定（実時間環境のノイズに強い）
+    #   batch_size=128: 大きめのミニバッチで安定更新
+    #   n_epochs=4:   過学習防止（stale data 対策）
+    #   gamma=0.99:   即時的な報酬設計に合わせた割引率
     #   gae_lambda=0.95: GAE のバイアス-分散トレードオフ
-    #   ent_coef=0.01: エントロピーボーナス（探索促進）
+    #   ent_coef=0.02: 探索促進（キル等の稀なイベント発見のため）
     #   clip_range=0.2: PPO のクリッピング
+    #   max_grad_norm=0.5: 勾配クリッピングで安定性確保
     common_kwargs = dict(
         learning_rate=3e-4,
-        n_steps=512,
-        batch_size=64,
-        n_epochs=5,
-        gamma=0.995,
+        n_steps=1024,
+        batch_size=128,
+        n_epochs=4,
+        gamma=0.99,
         gae_lambda=0.95,
-        ent_coef=0.01,
+        ent_coef=0.02,
         clip_range=0.2,
+        max_grad_norm=0.5,
         device=RL_DEVICE,
         verbose=1,
     )

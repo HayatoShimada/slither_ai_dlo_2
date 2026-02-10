@@ -1,6 +1,6 @@
 """
 Selenium 経由で Chromium を制御し、slither.io を自動操作するモジュール。
-Docker コンテナ内の Xvfb に実描画する (headless=False)。
+Docker: Xvfb 上に実描画 (headed)。ローカル: headless=new でフォーカス奪取を防止。
 """
 
 from __future__ import annotations
@@ -15,15 +15,16 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-from config import GAME_URL, NICKNAME, SCREEN_WIDTH, SCREEN_HEIGHT
+from config import GAME_URL, NICKNAME, SCREEN_WIDTH, SCREEN_HEIGHT, HEADLESS_BROWSER
 
 
 def create_driver() -> webdriver.Chrome:
     """
     Chromium WebDriver を生成して返す。
 
-    Xvfb 上に実描画するため headless=False。
-    Docker コンテナ内で安全に動作するフラグを設定。
+    Docker (Xvfb): headed モードで VNC に表示。
+    ローカル: headless=new でフォーカス奪取を完全に防止。
+    HEADLESS_BROWSER 設定で切替可能（デフォルト auto: Docker外なら headless）。
 
     Returns
     -------
@@ -39,9 +40,67 @@ def create_driver() -> webdriver.Chrome:
     options.add_argument("--disable-gpu-sandbox")
     options.add_argument("--disable-extensions")
 
+    # ウィンドウ最小化・非表示時の JS/レンダリング抑制を無効化
+    options.add_argument("--disable-background-timer-throttling")
+    options.add_argument("--disable-backgrounding-occluded-windows")
+    options.add_argument("--disable-renderer-backgrounding")
+
+    # ローカル実行: headless=new でブラウザウィンドウを非表示化
+    # Chrome 112+ の headless=new は headed と同じレンダリングエンジンを使うため
+    # canvas ゲームも正常動作し、スクリーンショットも取得可能
+    if HEADLESS_BROWSER:
+        options.add_argument("--headless=new")
+        print("[Browser] Headless mode enabled (no visible window, no focus steal)")
+
     # Selenium 4.6+ は chromedriver を自動ダウンロード・管理する
     driver = webdriver.Chrome(options=options)
+
+    # ページ読み込み前に anti-throttle JS を注入
+    # Page.addScriptToEvaluateOnNewDocument はナビゲーション毎に自動再実行される
+    _inject_anti_throttle(driver)
+
     return driver
+
+
+def _inject_anti_throttle(driver: webdriver.Chrome) -> None:
+    """
+    ブラウザ最小化・非表示時にゲームが停止するのを防ぐ JS を注入する。
+
+    対策:
+      1. Page Visibility API をオーバーライド → ゲームが常に「表示中」と認識
+      2. requestAnimationFrame を setTimeout(16ms) に置き換え →
+         rAF はバックグラウンドで停止するが setTimeout は
+         --disable-background-timer-throttling フラグで抑制解除済み
+      3. CDP Page.addScriptToEvaluateOnNewDocument で注入するため
+         ページ遷移・リロード後も自動的に再適用される
+    """
+    try:
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+                // --- Page Visibility API オーバーライド ---
+                Object.defineProperty(document, 'hidden', {
+                    get: function() { return false; }
+                });
+                Object.defineProperty(document, 'visibilityState', {
+                    get: function() { return 'visible'; }
+                });
+                document.addEventListener('visibilitychange', function(e) {
+                    e.stopImmediatePropagation();
+                }, true);
+
+                // --- requestAnimationFrame → setTimeout 置き換え ---
+                // rAF はウィンドウ非表示時にブラウザが停止させる。
+                // setTimeout(16ms ≈ 60fps) なら Chrome フラグで抑制解除済み。
+                window.requestAnimationFrame = function(cb) {
+                    return window.setTimeout(function() { cb(performance.now()); }, 16);
+                };
+                window.cancelAnimationFrame = function(id) {
+                    window.clearTimeout(id);
+                };
+            """
+        })
+    except Exception as e:
+        print(f"WARNING: Failed to inject anti-throttle script: {e}")
 
 
 def start_game(driver: webdriver.Chrome) -> None:
@@ -446,6 +505,121 @@ def dump_snake_properties(driver: webdriver.Chrome) -> None:
 def get_score(driver: webdriver.Chrome) -> int:
     """後方互換ラッパー。"""
     return get_game_state(driver)["score"]
+
+
+def get_js_entities(driver: webdriver.Chrome) -> dict:
+    """
+    JS injection で敵スネーク・食物の座標をまとめて取得する。
+
+    ゲーム内部の window.snakes / foods 配列から直接座標を読み取り、
+    プレイヤーからの相対スクリーン座標に変換して返す。
+    ビジョンベース検出よりも高精度・高速。
+
+    Returns
+    -------
+    dict
+        {
+            "enemies": list[dict]  -- 各敵: {sx, sy, heading, length}
+                                      sx/sy はスクリーンピクセル座標
+            "foods": list[list[int]]  -- 各食物: [sx, sy]
+            "gsc": float  -- ゲームのズームスケール
+            "ok": bool  -- 取得成功フラグ
+        }
+    """
+    try:
+        result = driver.execute_script("""
+            var out = {enemies: [], foods: [], gsc: 0, ok: false};
+
+            // プレイヤースネークの取得
+            var me = window.snake || null;
+            if (!me && window.snakes && Array.isArray(window.snakes)) {
+                for (var i = 0; i < window.snakes.length; i++) {
+                    if (window.snakes[i]) { me = window.snakes[i]; break; }
+                }
+            }
+            if (!me) return out;
+
+            // プレイヤーの座標
+            var mx = NaN, my = NaN;
+            if (typeof me.xx === 'number') { mx = me.xx; my = me.yy; }
+            else if (typeof me.x === 'number' && me.x > 100) { mx = me.x; my = me.y; }
+            if (isNaN(mx)) return out;
+
+            // ズームスケール
+            var gsc = (typeof window.gsc === 'number' && window.gsc > 0) ? window.gsc : 0.9;
+            out.gsc = gsc;
+
+            // スクリーン中心
+            var scx = """ + str(SCREEN_WIDTH // 2) + """;
+            var scy = """ + str(SCREEN_HEIGHT // 2) + """;
+
+            // --- 敵スネーク ---
+            if (window.snakes && Array.isArray(window.snakes)) {
+                var maxEnemy = 20;  // 上位20体まで
+                for (var i = 0; i < window.snakes.length && out.enemies.length < maxEnemy; i++) {
+                    var s = window.snakes[i];
+                    if (!s || s === me) continue;
+
+                    var ex = NaN, ey = NaN;
+                    if (typeof s.xx === 'number') { ex = s.xx; ey = s.yy; }
+                    else if (typeof s.x === 'number' && s.x > 100) { ex = s.x; ey = s.y; }
+                    if (isNaN(ex)) continue;
+
+                    // ワールド座標差をスクリーンピクセルに変換
+                    var sx = (ex - mx) * gsc + scx;
+                    var sy = (ey - my) * gsc + scy;
+
+                    // 画面外すぎるものはスキップ（画面の2倍まで）
+                    if (sx < -scx || sx > scx * 3 || sy < -scy || sy > scy * 3) continue;
+
+                    // heading (ang プロパティ)
+                    var heading = 0;
+                    if (typeof s.ang === 'number') heading = s.ang;
+                    else if (typeof s.eang === 'number') heading = s.eang;
+
+                    // 長さ推定 (sct = segment count)
+                    var length = 0;
+                    if (typeof s.sct === 'number') length = s.sct;
+                    else if (s.pts && Array.isArray(s.pts)) length = s.pts.length;
+
+                    out.enemies.push({sx: Math.round(sx), sy: Math.round(sy),
+                                      heading: heading, length: length});
+                }
+            }
+
+            // --- 食物 ---
+            // slither.io の食物は foods 配列またはグローバル配列に格納
+            var foodArr = window.foods || window.pellets || null;
+            if (!foodArr && window.foods_c) foodArr = window.foods_c;
+            if (foodArr && Array.isArray(foodArr)) {
+                var maxFood = 50;
+                for (var i = 0; i < foodArr.length && out.foods.length < maxFood; i++) {
+                    var f = foodArr[i];
+                    if (!f) continue;
+
+                    var fx = NaN, fy = NaN;
+                    if (typeof f.xx === 'number') { fx = f.xx; fy = f.yy; }
+                    else if (typeof f.x === 'number') { fx = f.x; fy = f.y; }
+                    if (isNaN(fx)) continue;
+
+                    var fsx = (fx - mx) * gsc + scx;
+                    var fsy = (fy - my) * gsc + scy;
+
+                    // 画面内のみ
+                    if (fsx < 0 || fsx > scx * 2 || fsy < 0 || fsy > scy * 2) continue;
+
+                    out.foods.push([Math.round(fsx), Math.round(fsy)]);
+                }
+            }
+
+            out.ok = true;
+            return out;
+        """)
+        if result and isinstance(result, dict) and result.get("ok"):
+            return result
+    except Exception:
+        pass
+    return {"enemies": [], "foods": [], "gsc": 0, "ok": False}
 
 
 def inject_toggle_listener(driver: webdriver.Chrome) -> None:
